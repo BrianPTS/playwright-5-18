@@ -12,6 +12,7 @@ import { dirname } from 'path';
 import SessionManager from './helpers/SessionManager.js';
 import pThrottle from 'p-throttle';
 import config from './config/scraperConfig.js';
+import _ from 'lodash';
 // CSV upload functionality removed
 let inventoryIdCounter = 0;
 
@@ -1082,24 +1083,9 @@ export class ScraperManager {
             // Row no longer exists in new data - mark for deletion
             rowsToDelete.push(existingData._id);
           } else {
-            // Helper to compare two arrays of strings (already normalized and sorted)
-            const areArraysEqual = (arr1, arr2) => {
-              if (arr1.length !== arr2.length) {
-                return false;
-              }
-
-              // Since we've already normalized to strings and sorted, we can do a direct comparison
-              for (let i = 0; i < arr1.length; i++) {
-                if (arr1[i] !== arr2[i]) {
-                  return false;
-                }
-              }
-
-              return true;
-            };
-
             // Check if row data has changed (excluding inventory ID)
-            const seatsChanged = !areArraysEqual(
+            // Using Lodash for more robust deep comparison
+            const seatsChanged = !_.isEqual(
               existingData.seats,
               newData.seats
             );
