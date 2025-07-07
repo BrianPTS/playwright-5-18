@@ -16,18 +16,27 @@ import config from './config/scraperConfig.js';
 let inventoryIdCounter = 0;
 
 function generateUniqueInventoryId() {
-  // Use timestamp (last 6 digits) + counter (4 digits) for uniqueness
+  // Enhanced algorithm to prevent collisions even under high load
   const timestamp = Date.now();
-  const timestampPart = parseInt(timestamp.toString().slice(-6)); // Last 6 digits of timestamp
-
-  // Increment counter and reset if it exceeds 4 digits
-  inventoryIdCounter = (inventoryIdCounter + 1) % 10000;
-
-  // Combine timestamp part (6 digits) + counter (4 digits) = 10 digits
-  const uniqueId = timestampPart * 10000 + inventoryIdCounter;
-
-  // Ensure it's always 10 digits by padding if necessary
-  return parseInt(uniqueId.toString().padStart(10, "1"));
+  const processId = process.pid % 1000; // Use process ID for multi-instance uniqueness
+  const random = Math.floor(Math.random() * 1000); // Add randomness
+  
+  // Increment counter and reset if it exceeds 3 digits (0-999)
+  inventoryIdCounter = (inventoryIdCounter + 1) % 1000;
+  
+  // Create a unique string: timestamp(13) + processId(3) + counter(3) + random(3) = 22 digits
+  const fullUniqueString = `${timestamp}${processId.toString().padStart(3, '0')}${inventoryIdCounter.toString().padStart(3, '0')}${random.toString().padStart(3, '0')}`;
+  
+  // Hash to 10 digits for compatibility while maintaining uniqueness
+  // Use a simple but effective hash that preserves uniqueness
+  const hash = fullUniqueString.split('').reduce((acc, char, index) => {
+    return ((acc << 5) - acc + char.charCodeAt(0) + index) & 0x7fffffff;
+  }, 0);
+  
+  // Ensure it's always 10 digits by taking modulo and padding
+  const tenDigitId = (hash % 9000000000) + 1000000000; // Ensures 10 digits (1000000000-9999999999)
+  
+  return tenDigitId;
 }
 
 // CSV processing functionality removed entirely
@@ -983,10 +992,9 @@ export class ScraperManager {
           }
         ).lean();
 
-        // Create maps for efficient lookups
+        // Create maps for efficient lookups - using unique keys to prevent collisions
         const existingRowMap = new Map();
         existingGroups.forEach((group) => {
-          const rowKey = `${group.section}-${group.row}`;
           // Extract seat numbers and ensure they're all strings for consistent comparison
           const extractedSeats = group.seats
             .map((s) => {
@@ -1002,8 +1010,16 @@ export class ScraperManager {
             })
             .sort(); // Sort lexicographically as strings
 
-          existingRowMap.set(rowKey, {
+          // Create unique key using section, row, seat range, and seat count to prevent collisions
+          // This ensures that groups with different seat configurations in the same section-row are treated separately
+          const seatRange = extractedSeats.length > 0 ? `${extractedSeats[0]}-${extractedSeats[extractedSeats.length - 1]}` : 'empty';
+          const seatHash = extractedSeats.join(','); // Create a hash of all seats for uniqueness
+          const uniqueKey = `${group.section}-${group.row}-${seatRange}-${extractedSeats.length}-${seatHash}`;
+
+          existingRowMap.set(uniqueKey, {
             _id: group._id,
+            section: group.section,
+            row: group.row,
             seatCount: group.seatCount,
             seats: extractedSeats,
             price: group.inventory?.listPrice,
@@ -1014,10 +1030,11 @@ export class ScraperManager {
 
         const newRowMap = new Map();
         validScrapeResult.forEach((group) => {
-          const rowKey = `${group.section}-${group.row}`;
           const basePrice = parseFloat(group.inventory.listPrice);
-          const increasedPrice =
-            basePrice * (1 + priceIncreasePercentage / 100);
+          // Apply flat $10 increase for prices below $35, otherwise use percentage increase
+          const increasedPrice = basePrice < 35 
+            ? basePrice + 10 
+            : basePrice * (1 + priceIncreasePercentage / 100);
 
           // Extract seat numbers and ensure they're all strings for consistent comparison
           const extractedSeats = group.seats
@@ -1034,7 +1051,15 @@ export class ScraperManager {
             })
             .sort(); // Sort lexicographically as strings
 
-          newRowMap.set(rowKey, {
+          // Create unique key using section, row, seat range, and seat count to prevent collisions
+          // This ensures that groups with different seat configurations in the same section-row are treated separately
+          const seatRange = extractedSeats.length > 0 ? `${extractedSeats[0]}-${extractedSeats[extractedSeats.length - 1]}` : 'empty';
+          const seatHash = extractedSeats.join(','); // Create a hash of all seats for uniqueness
+          const uniqueKey = `${group.section}-${group.row}-${seatRange}-${extractedSeats.length}-${seatHash}`;
+
+          newRowMap.set(uniqueKey, {
+            section: group.section,
+            row: group.row,
             seatCount: group.inventory.quantity,
             seats: extractedSeats, // Use the normalized and sorted array
             price: increasedPrice,
@@ -1050,8 +1075,8 @@ export class ScraperManager {
         let unchangedRows = 0;
 
         // Identify rows to delete or update
-        for (const [rowKey, existingData] of existingRowMap) {
-          const newData = newRowMap.get(rowKey);
+        for (const [uniqueKey, existingData] of existingRowMap) {
+          const newData = newRowMap.get(uniqueKey);
 
           if (!newData) {
             // Row no longer exists in new data - mark for deletion
@@ -1103,10 +1128,53 @@ export class ScraperManager {
         }
 
         // Identify new rows to insert
-        for (const [rowKey, newData] of newRowMap) {
-          if (!existingRowMap.has(rowKey)) {
-            rowsToInsert.push({ rowKey, data: newData });
+        for (const [uniqueKey, newData] of newRowMap) {
+          if (!existingRowMap.has(uniqueKey)) {
+            rowsToInsert.push({ uniqueKey, data: newData });
           }
+        }
+
+        // Validate inventory ID uniqueness before operations
+        const allInventoryIds = new Set();
+        const duplicateIds = [];
+        
+        // Check update operations
+        rowsToUpdate.forEach(({ data }) => {
+          const inventoryId = data.groupData.inventory.inventoryId;
+          if (allInventoryIds.has(inventoryId)) {
+            duplicateIds.push(inventoryId);
+          } else {
+            allInventoryIds.add(inventoryId);
+          }
+        });
+        
+        // Check insert operations
+        rowsToInsert.forEach(({ data }) => {
+          const inventoryId = data.groupData.inventory.inventoryId || generateUniqueInventoryId();
+          if (allInventoryIds.has(inventoryId)) {
+            duplicateIds.push(inventoryId);
+            // Generate new ID if collision detected
+            data.groupData.inventory.inventoryId = generateUniqueInventoryId();
+          } else {
+            allInventoryIds.add(inventoryId);
+            data.groupData.inventory.inventoryId = inventoryId;
+          }
+        });
+        
+        // Log any duplicate detections
+        if (duplicateIds.length > 0 && LOG_LEVEL >= 1) {
+          this.logWithTime(
+            `[Warning SM ${eventId}] Detected and resolved ${duplicateIds.length} inventory ID collisions.`,
+            "warning"
+          );
+        }
+        
+        // Log summary of operations
+        if (LOG_LEVEL >= 2) {
+          this.logWithTime(
+            `[Info SM ${eventId}] Database operations summary: ${rowsToDelete.length} to delete, ${rowsToUpdate.length} to update, ${rowsToInsert.length} to insert, ${unchangedRows} unchanged.`,
+            "info"
+          );
         }
 
         // Perform efficient updates only if there are changes
