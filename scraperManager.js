@@ -163,12 +163,12 @@ export class ScraperManager {
     this.eventLastProcessedTime = new Map(); // Track when each event was last processed
     this.eventPriorityScores = new Map(); // Cache priority scores
     this.eventMaxRetries = new Map(); // Track dynamic retry limits per event
-    
+
     // Enhanced throttled ScrapeEvent for concurrent processing
     this.throttledScrapeEvent = pThrottle({
       limit: config.CONCURRENT_LIMIT, // Use config value (8-12 concurrent)
       interval: config.PROCESSING_INTERVAL, // Use config value (500ms)
-      strict: false // Allow bursts for better throughput
+      strict: false, // Allow bursts for better throughput
     })(ScrapeEvent);
   }
 
@@ -287,37 +287,42 @@ export class ScraperManager {
 
     try {
       this.isRunning = true;
-      this.logWithTime("Starting continuous scraping with optimized retry handling...", "success");
-      
+      this.logWithTime(
+        "Starting continuous scraping with optimized retry handling...",
+        "success"
+      );
+
       // Background retry processor removed - retries handled in sequential processing
-      
+
       // Start performance monitoring
       this.startPerformanceMonitoring();
-      
+
       // Start session health monitoring
       this.startSessionHealthMonitoring();
-      
+
       // Start cookie rotation
       this.forcePeriodicCookieRotation();
-      
+
       // Start failure tracking cleanup (every 10 minutes)
       setInterval(() => {
         this.cleanupFailureTracking();
       }, 600000);
-      
+
       // Retry queue cleanup removed
-      
+
       // Start concurrent event processing
       this.logWithTime(
         "Started concurrent event processing with enhanced throughput",
         "success"
       );
-      
+
       // Main concurrent processing loop
       await this.startConcurrentProcessing();
-      
     } catch (error) {
-      this.logWithTime(`Error in startContinuousScraping: ${error.message}`, "error");
+      this.logWithTime(
+        `Error in startContinuousScraping: ${error.message}`,
+        "error"
+      );
       this.isRunning = false;
       throw error;
     }
@@ -332,23 +337,23 @@ export class ScraperManager {
 
     this.isRunning = false;
     this.logWithTime("Stopping continuous scraping...", "warning");
-    
+
     // Clear any active jobs
     this.activeJobs.clear();
     this.processingEvents.clear();
-    
+
     // Retry queue cleanup interval removed
-    
+
     this.logWithTime("Continuous scraping stopped", "success");
   }
 
   // Background retry processor removed - retries handled in sequential processing
-  
+
   // processEventWithRetry method removed - retry logic handled in sequential processing
 
-   // Helper methods for background retry processor removed - using sequential processing
- 
-   shouldSkipEvent(eventId) {
+  // Helper methods for background retry processor removed - using sequential processing
+
+  shouldSkipEvent(eventId) {
     // Check if event is in cooldown period
     if (this.cooldownEvents.has(eventId)) {
       const cooldownUntil = this.cooldownEvents.get(eventId);
@@ -678,7 +683,9 @@ export class ScraperManager {
         let capturedState = null;
         try {
           this.logWithTime(
-            `Attempting cookie refresh for ${eventToUse} with proxy ${cookieProxy ? cookieProxy.host + ':' + cookieProxy.port : 'none'}`,
+            `Attempting cookie refresh for ${eventToUse} with proxy ${
+              cookieProxy ? cookieProxy.host + ":" + cookieProxy.port : "none"
+            }`,
             "info"
           );
           capturedState = await refreshHeaders(eventToUse, cookieProxy);
@@ -993,9 +1000,10 @@ export class ScraperManager {
           }
         ).lean();
 
-        // Create maps for efficient lookups - using unique keys to prevent collisions
+        // Create maps for efficient lookups
         const existingRowMap = new Map();
         existingGroups.forEach((group) => {
+          const rowKey = `${group.section}-${group.row}`;
           // Extract seat numbers and ensure they're all strings for consistent comparison
           const extractedSeats = group.seats
             .map((s) => {
@@ -1011,16 +1019,8 @@ export class ScraperManager {
             })
             .sort(); // Sort lexicographically as strings
 
-          // Create unique key using section, row, seat range, and seat count to prevent collisions
-          // This ensures that groups with different seat configurations in the same section-row are treated separately
-          const seatRange = extractedSeats.length > 0 ? `${extractedSeats[0]}-${extractedSeats[extractedSeats.length - 1]}` : 'empty';
-          const seatHash = extractedSeats.join(','); // Create a hash of all seats for uniqueness
-          const uniqueKey = `${group.section}-${group.row}-${seatRange}-${extractedSeats.length}-${seatHash}`;
-
-          existingRowMap.set(uniqueKey, {
+          existingRowMap.set(rowKey, {
             _id: group._id,
-            section: group.section,
-            row: group.row,
             seatCount: group.seatCount,
             seats: extractedSeats,
             price: group.inventory?.listPrice,
@@ -1031,8 +1031,8 @@ export class ScraperManager {
 
         const newRowMap = new Map();
         validScrapeResult.forEach((group) => {
+          const rowKey = `${group.section}-${group.row}`;
           const basePrice = parseFloat(group.inventory.listPrice);
-          // Apply flat $10 increase for prices below $35, otherwise use percentage increase
           const increasedPrice = basePrice < 35 
             ? basePrice + 10 
             : basePrice * (1 + priceIncreasePercentage / 100);
@@ -1052,15 +1052,7 @@ export class ScraperManager {
             })
             .sort(); // Sort lexicographically as strings
 
-          // Create unique key using section, row, seat range, and seat count to prevent collisions
-          // This ensures that groups with different seat configurations in the same section-row are treated separately
-          const seatRange = extractedSeats.length > 0 ? `${extractedSeats[0]}-${extractedSeats[extractedSeats.length - 1]}` : 'empty';
-          const seatHash = extractedSeats.join(','); // Create a hash of all seats for uniqueness
-          const uniqueKey = `${group.section}-${group.row}-${seatRange}-${extractedSeats.length}-${seatHash}`;
-
-          newRowMap.set(uniqueKey, {
-            section: group.section,
-            row: group.row,
+          newRowMap.set(rowKey, {
             seatCount: group.inventory.quantity,
             seats: extractedSeats, // Use the normalized and sorted array
             price: increasedPrice,
@@ -1076,16 +1068,31 @@ export class ScraperManager {
         let unchangedRows = 0;
 
         // Identify rows to delete or update
-        for (const [uniqueKey, existingData] of existingRowMap) {
-          const newData = newRowMap.get(uniqueKey);
+        for (const [rowKey, existingData] of existingRowMap) {
+          const newData = newRowMap.get(rowKey);
 
           if (!newData) {
             // Row no longer exists in new data - mark for deletion
             rowsToDelete.push(existingData._id);
           } else {
+            // Helper to compare two arrays of strings (already normalized and sorted)
+            const areArraysEqual = (arr1, arr2) => {
+              if (arr1.length !== arr2.length) {
+                return false;
+              }
+
+              // Since we've already normalized to strings and sorted, we can do a direct comparison
+              for (let i = 0; i < arr1.length; i++) {
+                if (arr1[i] !== arr2[i]) {
+                  return false;
+                }
+              }
+
+              return true;
+            };
+
             // Check if row data has changed (excluding inventory ID)
-            // Using Lodash for more robust deep comparison
-            const seatsChanged = !_.isEqual(
+            const seatsChanged = !areArraysEqual(
               existingData.seats,
               newData.seats
             );
@@ -1114,53 +1121,10 @@ export class ScraperManager {
         }
 
         // Identify new rows to insert
-        for (const [uniqueKey, newData] of newRowMap) {
-          if (!existingRowMap.has(uniqueKey)) {
-            rowsToInsert.push({ uniqueKey, data: newData });
+        for (const [rowKey, newData] of newRowMap) {
+          if (!existingRowMap.has(rowKey)) {
+            rowsToInsert.push({ rowKey, data: newData });
           }
-        }
-
-        // Validate inventory ID uniqueness before operations
-        const allInventoryIds = new Set();
-        const duplicateIds = [];
-        
-        // Check update operations
-        rowsToUpdate.forEach(({ data }) => {
-          const inventoryId = data.groupData.inventory.inventoryId;
-          if (allInventoryIds.has(inventoryId)) {
-            duplicateIds.push(inventoryId);
-          } else {
-            allInventoryIds.add(inventoryId);
-          }
-        });
-        
-        // Check insert operations
-        rowsToInsert.forEach(({ data }) => {
-          const inventoryId = data.groupData.inventory.inventoryId || generateUniqueInventoryId();
-          if (allInventoryIds.has(inventoryId)) {
-            duplicateIds.push(inventoryId);
-            // Generate new ID if collision detected
-            data.groupData.inventory.inventoryId = generateUniqueInventoryId();
-          } else {
-            allInventoryIds.add(inventoryId);
-            data.groupData.inventory.inventoryId = inventoryId;
-          }
-        });
-        
-        // Log any duplicate detections
-        if (duplicateIds.length > 0 && LOG_LEVEL >= 1) {
-          this.logWithTime(
-            `[Warning SM ${eventId}] Detected and resolved ${duplicateIds.length} inventory ID collisions.`,
-            "warning"
-          );
-        }
-        
-        // Log summary of operations
-        if (LOG_LEVEL >= 2) {
-          this.logWithTime(
-            `[Info SM ${eventId}] Database operations summary: ${rowsToDelete.length} to delete, ${rowsToUpdate.length} to update, ${rowsToInsert.length} to insert, ${unchangedRows} unchanged.`,
-            "info"
-          );
         }
 
         // Perform efficient updates only if there are changes
@@ -1230,7 +1194,7 @@ export class ScraperManager {
                         notes: group.inventory.notes,
                         tags: group.inventory.tags,
                         offerId: group.inventory.offerId,
-                        splitType: group.inventory.splitType,
+                        splitType: group.inventory.splitType || "CUSTOM",
                         publicNotes: group.inventory.publicNotes,
                         listPrice: increasedPrice,
                         face_price: group.inventory.faceValue,
@@ -1358,7 +1322,7 @@ export class ScraperManager {
                   notes: group.inventory.notes,
                   tags: group.inventory.tags,
                   offerId: group.inventory.offerId,
-                  splitType: group.inventory.splitType || "NEVERLEAVEONE",
+                  splitType: group.inventory.splitType || "CUSTOM",
                   publicNotes: group.inventory.publicNotes,
                   listPrice: increasedPrice,
                   face_price: group.inventory.faceValue,
@@ -1753,15 +1717,12 @@ export class ScraperManager {
   clearFailureCount(eventId) {
     this.eventFailureCounts.delete(eventId);
     this.eventFailureTimes.delete(eventId);
-    
 
-
-    
     // Clear from error tracker if available
     if (this.errorTracker && this.errorTracker.clearFailureCount) {
       this.errorTracker.clearFailureCount(eventId);
     }
-    
+
     // Remove from processing locks if stuck
     this.processingLocks.delete(eventId);
     this.processingEvents.delete(eventId);
@@ -1773,21 +1734,25 @@ export class ScraperManager {
   performHealthCheck() {
     const now = Date.now();
     const fiveMinutesAgo = now - 300000;
-    
+
     // Count stuck events
-    const stuckEvents = Array.from(this.processingLocks.entries())
-      .filter(([_, lockTime]) => lockTime < fiveMinutesAgo).length;
-    
+    const stuckEvents = Array.from(this.processingLocks.entries()).filter(
+      ([_, lockTime]) => lockTime < fiveMinutesAgo
+    ).length;
+
     // Count failed events
     const failedEventsCount = this.failedEvents.size;
-    
+
     // Count processing queue size
     const processingQueueSize = this.eventProcessingQueue.length;
-    
+
     // Calculate success rate
     const totalAttempts = this.successCount + failedEventsCount;
-    const successRate = totalAttempts > 0 ? (this.successCount / totalAttempts * 100).toFixed(1) : 0;
-    
+    const successRate =
+      totalAttempts > 0
+        ? ((this.successCount / totalAttempts) * 100).toFixed(1)
+        : 0;
+
     // Log health status if there are issues
     if (stuckEvents > 0 || failedEventsCount > 10) {
       this.logWithTime(
@@ -1796,7 +1761,8 @@ export class ScraperManager {
       );
     } else {
       // Periodic positive health report
-      if (now % 300000 < 60000) { // Every 5 minutes
+      if (now % 300000 < 60000) {
+        // Every 5 minutes
         this.logWithTime(
           `✅ Health Check: System healthy - ${successRate}% success rate, ${processingQueueSize} events processing`,
           "info"
@@ -2154,22 +2120,31 @@ export class ScraperManager {
   async startConcurrentProcessing() {
     let consecutiveFailures = 0;
     let lastSuccessfulBatch = Date.now();
-    
+
     while (this.isRunning) {
       try {
         // Get events that need processing
         const eventsToProcess = await this.getEvents();
-        
+
         if (eventsToProcess.length > 0) {
           // Check if we should use parallel batch processing for high throughput
           if (eventsToProcess.length >= 9 && consecutiveFailures === 0) {
             // Use parallel batch processing for 9+ events with good success rate
-            const maxParallelBatches = Math.min(5, Math.floor(eventsToProcess.length / 3)); // Increased max parallel batches
-            
-            this.logWithTime(`Using parallel batch processing for ${eventsToProcess.length} events`, "info");
-            
-            const parallelResult = await this.processMultipleBatches(eventsToProcess, maxParallelBatches);
-            
+            const maxParallelBatches = Math.min(
+              5,
+              Math.floor(eventsToProcess.length / 3)
+            ); // Increased max parallel batches
+
+            this.logWithTime(
+              `Using parallel batch processing for ${eventsToProcess.length} events`,
+              "info"
+            );
+
+            const parallelResult = await this.processMultipleBatches(
+              eventsToProcess,
+              maxParallelBatches
+            );
+
             if (parallelResult) {
               // Update tracking based on parallel processing results
               if (parallelResult.successRate > 0.7) {
@@ -2178,49 +2153,65 @@ export class ScraperManager {
               } else {
                 consecutiveFailures++;
               }
-              
+
               // Process remaining events if any
-              if (parallelResult.remainingEvents && parallelResult.remainingEvents.length > 0) {
-                this.logWithTime(`${parallelResult.remainingEvents.length} events remaining for next cycle`, "info");
+              if (
+                parallelResult.remainingEvents &&
+                parallelResult.remainingEvents.length > 0
+              ) {
+                this.logWithTime(
+                  `${parallelResult.remainingEvents.length} events remaining for next cycle`,
+                  "info"
+                );
               }
-              
+
               // Shorter delay after parallel processing
-              const parallelDelay = parallelResult.successRate > 0.8 ? 300 : 800;
+              const parallelDelay =
+                parallelResult.successRate > 0.8 ? 300 : 800;
               await setTimeout(parallelDelay + Math.random() * 200);
               continue; // Skip regular batch processing
             }
           }
-          
+
           // Regular batch processing for smaller numbers or when parallel processing isn't suitable
           const optimalBatchSize = 5; // Increased optimal batch size for better throughput
-            let batchSize = Math.min(optimalBatchSize, eventsToProcess.length);
-            
-            // Adaptive batch sizing based on recent success rate
-            if (consecutiveFailures > 2) {
-              // Instead of reducing to 1, maintain a minimum batch size (e.g., 2 or 3) or implement a more sophisticated backoff.
-              // For now, let's ensure it's at least 2.
-              batchSize = Math.max(2, optimalBatchSize);
-              this.logWithTime(`Maintaining minimum batch size of ${batchSize} due to recent failures`, "warning");
-            } else if (consecutiveFailures === 0 && eventsToProcess.length >= 6) {
-              // Increase to 6 events if we're doing well and have many events
+          let batchSize = Math.min(optimalBatchSize, eventsToProcess.length);
+
+          // Adaptive batch sizing based on recent success rate
+          if (consecutiveFailures > 2) {
+            // Instead of reducing to 1, maintain a minimum batch size (e.g., 2 or 3) or implement a more sophisticated backoff.
+            // For now, let's ensure it's at least 2.
+            batchSize = Math.max(2, optimalBatchSize);
+            this.logWithTime(
+              `Maintaining minimum batch size of ${batchSize} due to recent failures`,
+              "warning"
+            );
+          } else if (consecutiveFailures === 0 && eventsToProcess.length >= 6) {
+            // Increase to 6 events if we're doing well and have many events
             batchSize = Math.min(6, eventsToProcess.length);
-            this.logWithTime(`Increasing batch size to ${batchSize} for better throughput`, "info");
+            this.logWithTime(
+              `Increasing batch size to ${batchSize} for better throughput`,
+              "info"
+            );
           }
-          
+
           const batch = eventsToProcess.slice(0, batchSize);
-          
-          this.logWithTime(`Processing regular batch of ${batch.length} events (${eventsToProcess.length} total available)`, "info");
-          
+
+          this.logWithTime(
+            `Processing regular batch of ${batch.length} events (${eventsToProcess.length} total available)`,
+            "info"
+          );
+
           // Optimized jitter for fast batch processing
           const jitterDelay = Math.random() * 500; // Reduced to 0-500ms for faster processing
           await setTimeout(jitterDelay);
-          
+
           // Process batch with optimized staggered starts for 3-event batches
           const processingPromises = batch.map(async (eventId, index) => {
             if (this.processingEvents.has(eventId)) {
               return null; // Skip if already processing
             }
-            
+
             // Optimized stagger timing for fast batch processing
             let staggerDelay = 0;
             if (batchSize <= 3) {
@@ -2231,37 +2222,44 @@ export class ScraperManager {
               staggerDelay = index * (100 + Math.random() * 200);
             }
             await setTimeout(staggerDelay);
-            
+
             try {
               this.processingEvents.add(eventId);
-              
+
               // Add processing timeout to prevent stuck events
               const processingTimeout = config.SCRAPE_TIMEOUT + 10000; // Extra 10s buffer
-              
+
               const result = await Promise.race([
                 this.scrapeEventWithNaturalBehavior(eventId),
                 setTimeout(processingTimeout).then(() => {
-                  throw new Error(`Processing timeout after ${processingTimeout}ms`);
-                })
+                  throw new Error(
+                    `Processing timeout after ${processingTimeout}ms`
+                  );
+                }),
               ]);
-              
+
               if (result) {
                 this.eventLastProcessedTime.set(eventId, Date.now());
                 this.resetEventFailureTracking(eventId);
-                this.logWithTime(`✅ Successfully processed event ${eventId}`, "success");
+                this.logWithTime(
+                  `✅ Successfully processed event ${eventId}`,
+                  "success"
+                );
                 return { eventId, success: true };
               } else {
                 await this.handleEventFailureGracefully(eventId);
                 return { eventId, success: false };
               }
-              
             } catch (error) {
-              this.logWithTime(`❌ Error processing event ${eventId}: ${error.message}`, "error");
+              this.logWithTime(
+                `❌ Error processing event ${eventId}: ${error.message}`,
+                "error"
+              );
               await this.handleEventFailureGracefully(eventId);
               return { eventId, success: false, error: error.message };
             } finally {
               this.processingEvents.delete(eventId);
-              
+
               // Optimized post-processing delay for fast batches
               if (batchSize <= 3) {
                 // Minimal delay for small batches (25-75ms)
@@ -2272,68 +2270,89 @@ export class ScraperManager {
               }
             }
           });
-          
+
           // Wait for all concurrent operations to complete
           const results = await Promise.allSettled(processingPromises);
-          
+
           // Analyze batch results for adaptive behavior
-          const successfulResults = results.filter(r => 
-            r.status === 'fulfilled' && r.value?.success
+          const successfulResults = results.filter(
+            (r) => r.status === "fulfilled" && r.value?.success
           ).length;
-          
+
           const batchSuccessRate = successfulResults / batch.length;
-          
+
           if (batchSuccessRate > 0.7) {
             consecutiveFailures = 0;
             lastSuccessfulBatch = Date.now();
           } else {
             consecutiveFailures++;
           }
-          
+
           // Optimized adaptive delay for fast 3-event batch processing
           let nextBatchDelay = config.PROCESSING_INTERVAL;
-          
+
           if (batchSuccessRate < 0.3) {
             // Poor success rate - moderate slowdown for 3-event batches
             nextBatchDelay = config.PROCESSING_INTERVAL * 2;
-            this.logWithTime(`Poor success rate (${Math.round(batchSuccessRate * 100)}%), slowing down moderately`, "warning");
+            this.logWithTime(
+              `Poor success rate (${Math.round(
+                batchSuccessRate * 100
+              )}%), slowing down moderately`,
+              "warning"
+            );
           } else if (batchSuccessRate < 0.6) {
             // Moderate success rate - slight slowdown
             nextBatchDelay = config.PROCESSING_INTERVAL * 1.5;
           } else if (batchSuccessRate >= 0.8 && batchSize <= 3) {
             // Excellent success rate with small batches - speed up
             nextBatchDelay = Math.max(200, config.PROCESSING_INTERVAL * 0.5);
-            this.logWithTime(`Excellent success rate (${Math.round(batchSuccessRate * 100)}%), speeding up batch processing`, "success");
+            this.logWithTime(
+              `Excellent success rate (${Math.round(
+                batchSuccessRate * 100
+              )}%), speeding up batch processing`,
+              "success"
+            );
           }
-          
+
           // Reduced jitter for faster processing
           nextBatchDelay += Math.random() * 300;
-          
+
           await setTimeout(nextBatchDelay);
-          
         } else {
           // No events to process, wait before checking again
-          await setTimeout(config.PROCESSING_INTERVAL * 2 + Math.random() * 1000);
+          await setTimeout(
+            config.PROCESSING_INTERVAL * 2 + Math.random() * 1000
+          );
         }
-        
+
         // Emergency slowdown if no successful batches for too long
-        if (Date.now() - lastSuccessfulBatch > 300000) { // 5 minutes
-          this.logWithTime("No successful batches for 5 minutes, implementing emergency slowdown", "error");
+        if (Date.now() - lastSuccessfulBatch > 300000) {
+          // 5 minutes
+          this.logWithTime(
+            "No successful batches for 5 minutes, implementing emergency slowdown",
+            "error"
+          );
           await setTimeout(10000); // 10 second pause
           consecutiveFailures = Math.max(consecutiveFailures, 5);
         }
-        
       } catch (error) {
-        this.logWithTime(`Concurrent processing error: ${error.message}`, "error");
+        this.logWithTime(
+          `Concurrent processing error: ${error.message}`,
+          "error"
+        );
         consecutiveFailures++;
-        
+
         // Exponential backoff on errors
-        const errorDelay = Math.min(30000, config.PROCESSING_INTERVAL * Math.pow(2, Math.min(consecutiveFailures, 5)));
+        const errorDelay = Math.min(
+          30000,
+          config.PROCESSING_INTERVAL *
+            Math.pow(2, Math.min(consecutiveFailures, 5))
+        );
         await setTimeout(errorDelay);
       }
     }
   }
-  
+
   /**
    * Handle event failure with graceful backoff and natural behavior
    */
@@ -2343,40 +2362,52 @@ export class ScraperManager {
       const currentFailures = this.eventFailureCount.get(eventId) || 0;
       const newFailureCount = currentFailures + 1;
       const now = Date.now();
-      
+
       this.eventFailureCount.set(eventId, newFailureCount);
       this.eventLastFailureTime.set(eventId, now);
-      
+
       // More forgiving failure thresholds
       const baseDelay = 2000; // Start with 2 seconds
       const maxDelay = 120000; // Max 2 minutes
-      
+
       // Gentler exponential backoff with jitter
-      let backoffDelay = Math.min(maxDelay, baseDelay * Math.pow(1.4, newFailureCount));
-      
+      let backoffDelay = Math.min(
+        maxDelay,
+        baseDelay * Math.pow(1.4, newFailureCount)
+      );
+
       // Add random jitter (±30%) to prevent synchronized retries
       const jitter = backoffDelay * 0.3 * (Math.random() - 0.5);
       backoffDelay = Math.max(1000, backoffDelay + jitter);
-      
+
       // Reset failure count if it's been a while since last failure
       const lastFailureTime = this.eventLastFailureTime.get(eventId) || 0;
-      if (now - lastFailureTime > 900000) { // 15 minutes
+      if (now - lastFailureTime > 900000) {
+        // 15 minutes
         this.eventFailureCount.set(eventId, 1);
         backoffDelay = baseDelay;
-        this.logWithTime(`Resetting failure count for event ${eventId} due to time gap`, "info");
+        this.logWithTime(
+          `Resetting failure count for event ${eventId} due to time gap`,
+          "info"
+        );
       }
-      
+
       // Don't give up - allow more retries with longer delays
       if (newFailureCount >= 20) {
-        this.logWithTime(`Event ${eventId} has failed ${newFailureCount} times, using maximum delay but continuing`, "warning");
+        this.logWithTime(
+          `Event ${eventId} has failed ${newFailureCount} times, using maximum delay but continuing`,
+          "warning"
+        );
         backoffDelay = maxDelay;
       }
-      
+
       this.logWithTime(
-        `⚠️ Event ${eventId} failed (${newFailureCount} failures), backing off for ${Math.round(backoffDelay/1000)}s`,
+        `⚠️ Event ${eventId} failed (${newFailureCount} failures), backing off for ${Math.round(
+          backoffDelay / 1000
+        )}s`,
         "warning"
       );
-      
+
       // Add to cooldown with natural timing
       this.cooldownEvents.set(eventId, now + backoffDelay);
       this.incrementFailureCount(eventId);
@@ -2385,9 +2416,11 @@ export class ScraperManager {
       if (this.sessionManager) {
         this.sessionManager.invalidateSessionForEvent(eventId);
       }
-      
     } catch (error) {
-      this.logWithTime(`Error in graceful failure handling for ${eventId}: ${error.message}`, "error");
+      this.logWithTime(
+        `Error in graceful failure handling for ${eventId}: ${error.message}`,
+        "error"
+      );
     }
   }
 
@@ -2407,50 +2440,57 @@ export class ScraperManager {
   }
 
   /**
-    * Clean up old failure tracking data
-    */
-   cleanupFailureTracking() {
-     const now = Date.now();
-     const oneHourAgo = now - 3600000; // 1 hour
-     
-     // Clean up old failure times (reset after 1 hour)
-     for (const [eventId, lastFailureTime] of this.eventLastFailureTime.entries()) {
-       if (lastFailureTime < oneHourAgo) {
-         this.eventFailureCount.delete(eventId);
-         this.eventLastFailureTime.delete(eventId);
-       }
-     }
-     
+   * Clean up old failure tracking data
+   */
+  cleanupFailureTracking() {
+    const now = Date.now();
+    const oneHourAgo = now - 3600000; // 1 hour
 
-     
-     // Circuit breaker cleanup removed
-   }
+    // Clean up old failure times (reset after 1 hour)
+    for (const [
+      eventId,
+      lastFailureTime,
+    ] of this.eventLastFailureTime.entries()) {
+      if (lastFailureTime < oneHourAgo) {
+        this.eventFailureCount.delete(eventId);
+        this.eventLastFailureTime.delete(eventId);
+      }
+    }
 
-   /**
-    * Update system circuit breaker based on recent failures
-    */
-   // updateSystemCircuitBreaker method removed
-  
+    // Circuit breaker cleanup removed
+  }
+
+  /**
+   * Update system circuit breaker based on recent failures
+   */
+  // updateSystemCircuitBreaker method removed
+
   /**
    * Refresh the event queue with new events
    */
   async refreshEventQueue() {
     try {
       const events = await this.getEvents();
-      
+
       // Add new events to queue
       for (const eventId of events) {
-        if (!this.eventProcessingQueue.some(item => 
-          (typeof item === 'string' ? item : item.eventId) === eventId
-        ) && !this.processingEvents.has(eventId)) {
+        if (
+          !this.eventProcessingQueue.some(
+            (item) =>
+              (typeof item === "string" ? item : item.eventId) === eventId
+          ) &&
+          !this.processingEvents.has(eventId)
+        ) {
           this.eventProcessingQueue.push(eventId);
         }
       }
-      
+
       // Retry queue processing removed
-      
     } catch (error) {
-      this.logWithTime(`Error refreshing event queue: ${error.message}`, "error");
+      this.logWithTime(
+        `Error refreshing event queue: ${error.message}`,
+        "error"
+      );
     }
   }
 
@@ -2464,101 +2504,108 @@ export class ScraperManager {
       // Single batch, use regular processing
       return null;
     }
-    
+
     const batchSize = 3;
     const batches = [];
-    
+
     // Split events into batches of 3
     for (let i = 0; i < allEvents.length; i += batchSize) {
       batches.push(allEvents.slice(i, i + batchSize));
     }
-    
+
     // Limit parallel batches to prevent overwhelming
     const parallelBatches = Math.min(maxParallelBatches, batches.length);
-    
-    this.logWithTime(`Processing ${parallelBatches} parallel batches of 3 events each (${allEvents.length} total events)`, "info");
-    
+
+    this.logWithTime(
+      `Processing ${parallelBatches} parallel batches of 3 events each (${allEvents.length} total events)`,
+      "info"
+    );
+
     const batchPromises = [];
-    
+
     for (let i = 0; i < parallelBatches; i++) {
       const batch = batches[i];
       if (batch && batch.length > 0) {
         batchPromises.push(this.processSingleBatch(batch, i));
       }
     }
-    
+
     try {
       const batchResults = await Promise.allSettled(batchPromises);
-      
+
       let totalSuccessful = 0;
       let totalProcessed = 0;
-      
+
       batchResults.forEach((result, index) => {
-        if (result.status === 'fulfilled' && result.value) {
+        if (result.status === "fulfilled" && result.value) {
           totalSuccessful += result.value.successful;
           totalProcessed += result.value.processed;
         }
       });
-      
-      const overallSuccessRate = totalProcessed > 0 ? totalSuccessful / totalProcessed : 0;
-      
+
+      const overallSuccessRate =
+        totalProcessed > 0 ? totalSuccessful / totalProcessed : 0;
+
       this.logWithTime(
-        `Parallel batch processing completed: ${totalSuccessful}/${totalProcessed} successful (${Math.round(overallSuccessRate * 100)}%)`,
+        `Parallel batch processing completed: ${totalSuccessful}/${totalProcessed} successful (${Math.round(
+          overallSuccessRate * 100
+        )}%)`,
         overallSuccessRate > 0.7 ? "success" : "warning"
       );
-      
+
       return {
         successful: totalSuccessful,
         processed: totalProcessed,
         successRate: overallSuccessRate,
-        remainingEvents: allEvents.slice(parallelBatches * batchSize)
+        remainingEvents: allEvents.slice(parallelBatches * batchSize),
       };
-      
     } catch (error) {
-      this.logWithTime(`Error in parallel batch processing: ${error.message}`, "error");
+      this.logWithTime(
+        `Error in parallel batch processing: ${error.message}`,
+        "error"
+      );
       return null;
     }
   }
-  
+
   /**
    * Process a single batch of 3 events with optimized timing
    */
   async processSingleBatch(batch, batchIndex = 0) {
     const startTime = Date.now();
-    
+
     // Add small stagger between parallel batches
     if (batchIndex > 0) {
       await setTimeout(batchIndex * 100);
     }
-    
+
     const processingPromises = batch.map(async (eventId, index) => {
       if (this.processingEvents.has(eventId)) {
-        return { eventId, success: false, reason: 'already_processing' };
+        return { eventId, success: false, reason: "already_processing" };
       }
-      
+
       // Minimal stagger within batch
       const staggerDelay = index * 75; // 75ms between events in batch
       await setTimeout(staggerDelay);
-      
+
       try {
         this.processingEvents.add(eventId);
-        
+
         const result = await Promise.race([
           this.scrapeEventWithNaturalBehavior(eventId),
           setTimeout(config.SCRAPE_TIMEOUT + 5000).then(() => {
             throw new Error(`Batch processing timeout`);
-          })
+          }),
         ]);
-        
+
         if (result) {
           this.eventLastProcessedTime.set(eventId, Date.now());
           this.resetEventFailureTracking(eventId);
           return { eventId, success: true };
         } else {
           await this.handleEventFailureGracefully(eventId);
-          return { eventId, success: false, reason: 'scrape_failed' };
+          return { eventId, success: false, reason: "scrape_failed" };
         }
-        
       } catch (error) {
         await this.handleEventFailureGracefully(eventId);
         return { eventId, success: false, reason: error.message };
@@ -2566,21 +2613,23 @@ export class ScraperManager {
         this.processingEvents.delete(eventId);
       }
     });
-    
+
     const results = await Promise.allSettled(processingPromises);
-    
-    const successful = results.filter(r => 
-      r.status === 'fulfilled' && r.value?.success
+
+    const successful = results.filter(
+      (r) => r.status === "fulfilled" && r.value?.success
     ).length;
-    
+
     const processed = results.length;
     const processingTime = Date.now() - startTime;
-    
+
     this.logWithTime(
-      `Batch ${batchIndex + 1} completed: ${successful}/${processed} successful in ${processingTime}ms`,
+      `Batch ${
+        batchIndex + 1
+      } completed: ${successful}/${processed} successful in ${processingTime}ms`,
       successful === processed ? "success" : "warning"
     );
-    
+
     return { successful, processed, processingTime };
   }
 
@@ -2591,37 +2640,44 @@ export class ScraperManager {
     const startTime = Date.now();
     let proxyAgent = null;
     let proxy = null;
-    
+
     try {
       // Add natural pre-processing delay (human-like behavior)
       const preDelay = 200 + Math.random() * 800; // 200-1000ms
       await setTimeout(preDelay);
-      
+
       // Check if we should skip due to recent processing
       const lastProcessed = this.eventLastProcessedTime.get(eventId);
       const minInterval = 45000 + Math.random() * 15000; // 45-60 seconds
       if (lastProcessed && Date.now() - lastProcessed < minInterval) {
-        this.logWithTime(`Skipping event ${eventId} - processed recently`, "info");
+        this.logWithTime(
+          `Skipping event ${eventId} - processed recently`,
+          "info"
+        );
         return true;
       }
-      
+
       // Check cooldown with some tolerance
       const cooldownEnd = this.cooldownEvents.get(eventId);
       if (cooldownEnd && Date.now() < cooldownEnd) {
         const remainingCooldown = Math.round((cooldownEnd - Date.now()) / 1000);
-        this.logWithTime(`Event ${eventId} still in cooldown for ${remainingCooldown}s`, "info");
+        this.logWithTime(
+          `Event ${eventId} still in cooldown for ${remainingCooldown}s`,
+          "info"
+        );
         return false;
       }
-      
+
       // Get proxy with retry logic
       let proxyAttempts = 0;
       const maxProxyAttempts = 3;
-      
+
       while (proxyAttempts < maxProxyAttempts && !proxy) {
         try {
           const proxyData = this.proxyManager.getProxyForEvent(eventId);
           if (proxyData) {
-            const proxyAgentData = this.proxyManager.createProxyAgent(proxyData);
+            const proxyAgentData =
+              this.proxyManager.createProxyAgent(proxyData);
             proxyAgent = proxyAgentData.proxyAgent;
             proxy = proxyAgentData.proxy;
             this.proxyManager.assignProxyToEvent(eventId, proxy.proxy);
@@ -2629,34 +2685,42 @@ export class ScraperManager {
           }
         } catch (proxyError) {
           proxyAttempts++;
-          this.logWithTime(`Proxy attempt ${proxyAttempts} failed for ${eventId}: ${proxyError.message}`, "warning");
+          this.logWithTime(
+            `Proxy attempt ${proxyAttempts} failed for ${eventId}: ${proxyError.message}`,
+            "warning"
+          );
           if (proxyAttempts < maxProxyAttempts) {
             await setTimeout(1000 * proxyAttempts); // Progressive delay
           }
         }
       }
-      
+
       // Get headers with natural retry behavior
       let headers = null;
       let headerAttempts = 0;
       const maxHeaderAttempts = 3;
-      
+
       while (headerAttempts < maxHeaderAttempts && !headers) {
         try {
           const randomEventId = await this.getRandomEventId(eventId);
           headers = await this.refreshEventHeaders(randomEventId, false);
-          
+
           if (headers) {
             // Add natural headers and identifiers
             if (headers.headers) {
               headers.headers["X-Event-ID"] = eventId;
-              headers.headers["X-Session-ID"] = `natural-${eventId}-${Date.now()}`;
-              headers.headers["X-Request-ID"] = `req-${Math.random().toString(36).substring(2)}`;
+              headers.headers[
+                "X-Session-ID"
+              ] = `natural-${eventId}-${Date.now()}`;
+              headers.headers["X-Request-ID"] = `req-${Math.random()
+                .toString(36)
+                .substring(2)}`;
               headers.headers["X-Processing-Time"] = Date.now().toString();
               headers.headers["X-Natural-Timing"] = "true";
-              
+
               // Add realistic user-agent rotation
-              if (Math.random() < 0.1) { // 10% chance to vary user agent
+              if (Math.random() < 0.1) {
+                // 10% chance to vary user agent
                 headers.headers["User-Agent"] = this.getRandomUserAgent();
               }
             }
@@ -2664,17 +2728,20 @@ export class ScraperManager {
           }
         } catch (headerError) {
           headerAttempts++;
-          this.logWithTime(`Header attempt ${headerAttempts} failed for ${eventId}: ${headerError.message}`, "warning");
+          this.logWithTime(
+            `Header attempt ${headerAttempts} failed for ${eventId}: ${headerError.message}`,
+            "warning"
+          );
           if (headerAttempts < maxHeaderAttempts) {
             await setTimeout(2000 * headerAttempts); // Progressive delay
           }
         }
       }
-      
+
       if (!headers) {
         throw new Error("Failed to obtain headers after multiple attempts");
       }
-      
+
       // Create event object with natural session data
       const eventWithNaturalSession = {
         eventId: eventId,
@@ -2682,46 +2749,46 @@ export class ScraperManager {
         sessionId: `natural-${eventId}-${Date.now()}`,
         proxyId: proxy?.proxy || "default",
         processingStart: startTime,
-        naturalBehavior: true
+        naturalBehavior: true,
       };
-      
+
       // Add natural pre-scrape delay
       const preScrapeDelay = 300 + Math.random() * 700; // 300-1000ms
       await setTimeout(preScrapeDelay);
-      
+
       // Perform scrape with extended timeout for natural behavior
       const extendedTimeout = (config.SCRAPE_TIMEOUT || 30000) + 5000; // Extra 5s
-      
+
       const result = await Promise.race([
         this.throttledScrapeEvent(eventWithNaturalSession, proxyAgent, proxy),
         setTimeout(extendedTimeout).then(() => {
           throw new Error(`Natural scrape timeout after ${extendedTimeout}ms`);
-        })
+        }),
       ]);
-      
+
       // Validate result with more lenient criteria
       if (!result) {
         throw new Error("No result returned from scrape");
       }
-      
+
       if (Array.isArray(result) && result.length === 0) {
         // Empty results should be treated as failures
         throw new Error("Event returned empty results - treating as failed");
       }
-      
+
       // Add natural post-processing delay
       const postDelay = 100 + Math.random() * 400; // 100-500ms
       await setTimeout(postDelay);
-      
+
       // Update metadata and tracking
       await this.updateEventMetadataAsync(eventId, result);
-      
+
       // Success tracking with natural timing
       this.successCount++;
       this.lastSuccessTime = moment();
       this.resetEventFailureTracking(eventId);
       this.eventUpdateTimestamps.set(eventId, moment());
-      
+
       // Update database with natural timing
       try {
         await Event.updateOne(
@@ -2729,36 +2796,44 @@ export class ScraperManager {
           { $set: { Last_Updated: new Date() } }
         );
       } catch (dbError) {
-        this.logWithTime(`DB update warning for ${eventId}: ${dbError.message}`, "warning");
+        this.logWithTime(
+          `DB update warning for ${eventId}: ${dbError.message}`,
+          "warning"
+        );
       }
-      
+
       // Update processed time with jitter to prevent synchronization
       const jitteredTime = Date.now() + Math.random() * 5000; // 0-5s jitter
       this.eventLastProcessedTime.set(eventId, jitteredTime);
-      
+
       this.failedEvents.delete(eventId);
       this.clearFailureCount(eventId);
-      
+
       // Release proxy with success flag
       if (proxy) {
         this.proxyManager.releaseProxy(eventId, true);
       }
-      
+
       const processingTime = Date.now() - startTime;
-      this.logWithTime(`✅ Natural processing completed for ${eventId} in ${processingTime}ms`, "success");
-      
+      this.logWithTime(
+        `✅ Natural processing completed for ${eventId} in ${processingTime}ms`,
+        "success"
+      );
+
       return result;
-      
     } catch (error) {
       // Enhanced error handling with context
       const processingTime = Date.now() - startTime;
-      this.logWithTime(`❌ Natural processing failed for ${eventId} after ${processingTime}ms: ${error.message}`, "error");
-      
+      this.logWithTime(
+        `❌ Natural processing failed for ${eventId} after ${processingTime}ms: ${error.message}`,
+        "error"
+      );
+
       // Release proxy on failure
       if (proxy) {
         this.proxyManager.releaseProxy(eventId, false);
       }
-      
+
       // Don't immediately fail - let the graceful handler decide
       return false;
     }
@@ -2769,11 +2844,11 @@ export class ScraperManager {
    */
   getRandomUserAgent() {
     const userAgents = [
-      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
-      'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-      'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0',
-      'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15'
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
+      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0",
+      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15",
     ];
     return userAgents[Math.floor(Math.random() * userAgents.length)];
   }
@@ -2866,7 +2941,7 @@ export class ScraperManager {
       // Success tracking
       this.successCount++;
       this.lastSuccessTime = moment();
-      
+
       // Reset failure tracking on success
       this.resetEventFailureTracking(eventId);
 
@@ -2978,8 +3053,6 @@ export class ScraperManager {
       );
     }
   }
-
-  // CSV generation methods removed
 
   async captureCookies(page, fingerprint) {
     let retryCount = 0;
@@ -3113,8 +3186,6 @@ export class ScraperManager {
     }
   }
 
-
-
   /**
    * Get statistics about stale events (events not updated in specific time periods)
    */
@@ -3232,7 +3303,10 @@ export class ScraperManager {
 
         // AUTO-STOP REMOVED: Failed recovery events will continue to be retried
         if (recoveryResult.failed.length > 0) {
-          this.logWithTime(`Recovery failed for ${recoveryResult.failed.length} events - will continue retrying`, "warning");
+          this.logWithTime(
+            `Recovery failed for ${recoveryResult.failed.length} events - will continue retrying`,
+            "warning"
+          );
         }
       }
 
@@ -3308,7 +3382,10 @@ export class ScraperManager {
 
     // AUTO-STOP REMOVED: Failed recovery events will continue to be retried
     if (recoveryResult.failed.length > 0) {
-      this.logWithTime(`Critical recovery failed for ${recoveryResult.failed.length} events - will continue retrying`, "warning");
+      this.logWithTime(
+        `Critical recovery failed for ${recoveryResult.failed.length} events - will continue retrying`,
+        "warning"
+      );
     }
   }
 
@@ -3515,11 +3592,7 @@ export class ScraperManager {
             }
 
             // Attempt scraping with current strategy
-            const scrapeResult = await this.scrapeEvent(
-              eventId,
-              0,
-              null
-            );
+            const scrapeResult = await this.scrapeEvent(eventId, 0, null);
 
             if (scrapeResult) {
               recovered = true;
@@ -3657,11 +3730,7 @@ export class ScraperManager {
             }
 
             // Attempt scraping with current approach
-            const scrapeResult = await this.scrapeEvent(
-              eventId,
-              0,
-              null
-            );
+            const scrapeResult = await this.scrapeEvent(eventId, 0, null);
 
             if (scrapeResult) {
               recovered = true;
@@ -3811,7 +3880,9 @@ export class ScraperManager {
         if (lockTime < fiveMinutesAgo) {
           this.processingLocks.delete(eventId);
           this.logWithTime(
-            `🔓 Released stuck processing lock for event ${eventId} (locked for ${Math.floor((Date.now() - lockTime) / 1000)}s)`,
+            `🔓 Released stuck processing lock for event ${eventId} (locked for ${Math.floor(
+              (Date.now() - lockTime) / 1000
+            )}s)`,
             "warning"
           );
         }
@@ -4231,34 +4302,44 @@ export class ScraperManager {
    * Start session health monitoring to detect and handle session failures
    */
   startSessionHealthMonitoring() {
-    this.logWithTime("Starting session health monitoring (5-minute cycles)", "info");
-    
+    this.logWithTime(
+      "Starting session health monitoring (5-minute cycles)",
+      "info"
+    );
+
     setInterval(async () => {
       try {
         const sessionStats = this.sessionManager.getSessionStats();
         const totalSessions = sessionStats.total;
         const invalidSessions = sessionStats.invalid;
-        
+
         if (totalSessions === 0) {
-          this.logWithTime("No sessions available - forcing session creation", "warning");
+          this.logWithTime(
+            "No sessions available - forcing session creation",
+            "warning"
+          );
           await this.sessionManager.forceSessionRotation();
           return;
         }
-        
+
         const invalidPercentage = (invalidSessions / totalSessions) * 100;
-        
+
         this.logWithTime(
-          `Session Health: ${totalSessions - invalidSessions}/${totalSessions} valid (${invalidPercentage.toFixed(1)}% invalid)`,
+          `Session Health: ${
+            totalSessions - invalidSessions
+          }/${totalSessions} valid (${invalidPercentage.toFixed(1)}% invalid)`,
           invalidPercentage > 30 ? "warning" : "info"
         );
-        
+
         // Force rotation if more than 30% of sessions are invalid
         if (invalidPercentage > 30) {
           this.logWithTime(
-            `High session failure rate detected (${invalidPercentage.toFixed(1)}%) - forcing graceful rotation`,
+            `High session failure rate detected (${invalidPercentage.toFixed(
+              1
+            )}%) - forcing graceful rotation`,
             "warning"
           );
-          
+
           try {
             await this.sessionManager.rotateSessionGracefully();
             this.logWithTime("Graceful session rotation completed", "success");
@@ -4400,7 +4481,10 @@ export class ScraperManager {
    */
   async setEventSkipScraping(eventId, reason, retryCount, retryLimit) {
     if (DISABLE_AUTO_STOP) {
-      this.logWithTime(`Skipping setting Skip_Scraping for event ${eventId} due to DISABLE_AUTO_STOP.`, "info");
+      this.logWithTime(
+        `Skipping setting Skip_Scraping for event ${eventId} due to DISABLE_AUTO_STOP.`,
+        "info"
+      );
       return false;
     }
     try {
@@ -4495,7 +4579,7 @@ export class ScraperManager {
 
       // Process up to 100 events normally
       let maxEventsToProcess = 100;
-      
+
       // Calculate priority for each event and filter those needing updates
       const eventsNeedingUpdate = [];
 
@@ -4519,9 +4603,9 @@ export class ScraperManager {
         const failureCount = this.eventFailureCount.get(eventId) || 0;
         const lastFailureTime = this.eventLastFailureTime.get(eventId) || 0;
         const timeSinceLastFailure = Date.now() - lastFailureTime;
-        
+
         // Apply exponential backoff for failed events
-        if (failureCount > 0 && timeSinceLastFailure < (failureCount * 60000)) {
+        if (failureCount > 0 && timeSinceLastFailure < failureCount * 60000) {
           continue; // Skip events in backoff period
         }
 
@@ -4574,15 +4658,13 @@ export class ScraperManager {
       // Sort by priority (highest first)
       eventsNeedingUpdate.sort((a, b) => b.priorityScore - a.priorityScore);
 
-
-
       // Return events that need updating, limited to maxEventsToProcess
       const eventsToReturn = eventsNeedingUpdate.map((event) => event.eventId);
-      
+
       if (eventsToReturn.length > maxEventsToProcess) {
         return eventsToReturn.slice(0, maxEventsToProcess);
       }
-      
+
       return eventsToReturn;
     } catch (error) {
       console.error("Error getting events to process:", error);

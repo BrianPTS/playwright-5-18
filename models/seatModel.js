@@ -215,6 +215,23 @@ const consecutiveGroupSchema = new mongoose.Schema(
   }
 );
 
+// Add compound unique index to prevent duplicate seat groups
+consecutiveGroupSchema.index(
+  {
+    eventId: 1,
+    mapping_id: 1,
+    section: 1,
+    row: 1,
+    seatRange: 1,
+    seatCount: 1,
+    "inventory.quantity": 1
+  },
+  {
+    unique: true,
+    name: "unique_seat_group"
+  }
+);
+
 export const ConsecutiveGroup = mongoose.model(
   "ConsecutiveGroup",
   consecutiveGroupSchema
