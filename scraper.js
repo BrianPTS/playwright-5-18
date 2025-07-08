@@ -12,7 +12,7 @@ import { BrowserFingerprint } from "./browserFingerprint.js";
 import pThrottle from 'p-throttle';
 import randomUseragent from 'random-useragent';
 import delay from 'delay-async';
-import pRetry from 'p-retry';
+
 import { CookieManager } from './helpers/CookieManager.js';
 import scraperManager from './scraperManager.js';
 import CookieRefreshTracker from './helpers/CookieRefreshTracker.js';
@@ -97,10 +97,8 @@ const iphone13 = devices["iPhone 13"];
 const COOKIES_FILE = "cookies.json";
 const CONFIG = {
   COOKIE_REFRESH_INTERVAL: 24 * 60 * 60 * 1000, // 24 hours
-  PAGE_TIMEOUT: 30000, // Increased from 15000 for better success rate
-  MAX_RETRIES: 5, // Increased from 3 for better recovery
-  RETRY_DELAY: 3000, // Reduced from 5000 for faster recovery
-  CHALLENGE_TIMEOUT: 8000, // Increased from 5000 for better challenge handling
+  PAGE_TIMEOUT: 30000, // 30 seconds for page operations
+  CHALLENGE_TIMEOUT: 8000, // 8 seconds for challenge handling
 };
 
 let browser = null;
@@ -516,7 +514,7 @@ const GetData = async (headers, proxyAgent, url, eventId) => {
       // Randomly adjust connection setting
       modifiedHeaders['Connection'] = Math.random() > 0.3 ? 'keep-alive' : 'close';
       
-      const response = await pRetry(() => throttledRequest({
+      const response = await throttledRequest({
         url,
         agent: {
           https: proxyAgent
@@ -526,20 +524,10 @@ const GetData = async (headers, proxyAgent, url, eventId) => {
           request: CONFIG.PAGE_TIMEOUT
         },
         retry: {
-          limit: 5, // Increased from 3 for better recovery
-          methods: ['GET'],
-          statusCodes: [408, 413, 429, 500, 502, 503, 504],
-          errorCodes: ['ETIMEDOUT', 'ECONNRESET', 'EADDRINUSE', 'ECONNREFUSED', 'EPIPE', 'ENOTFOUND', 'ENETUNREACH', 'EAI_AGAIN']
+          limit: 0 // No retries, fail fast
         },
         throwHttpErrors: false,
         signal: abortController.signal
-      }), {
-        retries: 7, // Increased from 5 for maximum recovery
-        onFailedAttempt: error => {
-          console.log(`Request attempt ${error.attemptNumber} failed for ${eventId}. ${error.retriesLeft} retries left.`);
-          // Longer delays between retries
-          return delay(error.attemptNumber * 2000 + Math.random() * 1000);
-        }
       });
 
       clearTimeout(timeout);
@@ -844,7 +832,6 @@ const ScrapeEvent = async (
       eventId,
       event,
       MapHeader,
-      0,
       startTime
     );
     const apiDuration = Date.now() - apiStartTime;
@@ -871,77 +858,28 @@ const ScrapeEvent = async (
       error.message
     );
 
-    // Implement automatic retry mechanism for recoverable errors
-    const recoverable =
-      error.message &&
-      (error.message.includes("proxy") ||
-        error.message.includes("timeout") ||
-        error.message.includes("network") ||
-        error.message.includes("ECONNRESET") ||
-        error.message.includes("ETIMEDOUT") ||
-        error.message.includes("circular") ||
-        error.message.includes("JSON") ||
-        error.message.includes("403")); // Also retry 403 errors with a new proxy
-
-    if (recoverable) {
-      // Track failed attempts to prevent infinite retries
-      if (!ScrapeEvent.failedAttempts) {
-        ScrapeEvent.failedAttempts = new Map();
-      }
-
-      const eventId = event?.eventId || event;
-      const attempts = (ScrapeEvent.failedAttempts.get(eventId) || 0) + 1;
-      ScrapeEvent.failedAttempts.set(eventId, attempts);
-
-      // Only retry if we haven't exceeded max attempts
-      if (attempts <= 5) { // Increased from 3
-        // Max 6 total attempts (1 original + 5 retries)
-        console.log(
-          `Retrying event ${eventId} after recoverable error (attempt ${attempts})`
-        );
-        // Add exponential backoff
-        const backoff = Math.pow(2, attempts) * 2000 + Math.random() * 1000;
-        await new Promise((resolve) => setTimeout(resolve, backoff));
-
-        // Try with a fresh proxy - ensure we get a different one than before
-        let newProxy, newProxyAgent;
-
-        if (global.proxyManager) {
-          // Release the old proxy with error
-          if (proxy && proxy.proxy) {
-            global.proxyManager.releaseProxy(eventId, false, error);
-          }
-
-          // Get a fresh proxy from ProxyManager
-          const proxyData = global.proxyManager.getProxyForEvent(eventId);
-          if (proxyData) {
-            const proxyAgentData =
-              global.proxyManager.createProxyAgent(proxyData);
-            newProxyAgent = proxyAgentData.proxyAgent;
-            newProxy = proxyData;
-          } else {
-            // Fallback
-            const proxyData = await GetProxy();
-            newProxyAgent = proxyData.proxyAgent;
-            newProxy = proxyData.proxy;
-          }
-        } else {
-          // Fallback to old method
-          const proxyData = await GetProxy();
-          newProxyAgent = proxyData.proxyAgent;
-          newProxy = proxyData.proxy;
-        }
-
-        return ScrapeEvent(event, newProxyAgent, newProxy);
-      } else {
-        // Clean up failed attempts tracking after some time
-        setTimeout(() => {
-          ScrapeEvent.failedAttempts.delete(eventId);
-        }, 10 * 60 * 1000); // 10 minutes
-
-        // Log final failure
-        console.error(`Exhausted all retry attempts for event ${eventId}`);
-      }
+    // Record failed event for monitoring
+    const eventId = event?.eventId || event;
+    const timestamp = new Date().toISOString();
+    
+    // Log to console for immediate visibility
+    console.log(`[FAILED EVENT] ${eventId} at ${timestamp}: ${error.message}`);
+    
+    // Track in a simple failed events collection
+    if (!ScrapeEvent.failedEvents) {
+      ScrapeEvent.failedEvents = [];
+    }
+    
+    ScrapeEvent.failedEvents.push({
+      eventId: eventId,
+      timestamp: timestamp,
+      error: error.message,
+      proxy: proxy?.proxy || 'unknown'
+    });
+    
+    // Keep only last 1000 failed events to prevent memory issues
+    if (ScrapeEvent.failedEvents.length > 1000) {
+      ScrapeEvent.failedEvents = ScrapeEvent.failedEvents.slice(-1000);
     }
 
     // Release proxy with error if we have a proxy manager
@@ -953,44 +891,16 @@ const ScrapeEvent = async (
   }
 };
 
-// Enhanced API call with better retry logic
-async function callTicketmasterAPI(facetHeader, proxyAgent, eventId, event, mapHeader = null, retryCount = 0, startTime) {
+// Simplified API call without retry logic
+async function callTicketmasterAPI(facetHeader, proxyAgent, eventId, event, mapHeader = null, startTime) {
   // Add a fallback for startTime if not provided
   startTime = startTime || Date.now();
-  
-  const maxRetries = 3;
-  const baseDelayMs = 1000; // Increased base delay
-  const maxDelayMs = 5000; // Increased max delay
-  const jitterFactor = 0.3; // Increased jitter
-  
-  let attempts = 0;
-  let lastError = null;
-  let result = null;
-  
-  // Enhanced proxy rotation with better error tracking
-  let alternativeProxies = [];
-  let proxyErrors = new Map();
-  
-  try {
-    for (let i = 0; i < 3; i++) { // Increased alternative proxies
-      try {
-        const { proxyAgent: altAgent, proxy: altProxy } = await GetProxy();
-        if (altAgent && altProxy) {
-          alternativeProxies.push({ proxyAgent: altAgent, proxy: altProxy });
-        }
-      } catch (proxyError) {
-        console.error(`Error getting alternative proxy ${i}:`, proxyError.message);
-      }
-    }
-  } catch (err) {
-    console.log(`Could not prepare alternative proxies: ${err.message}`);
-  }
   
   // Track API rate limits globally
   if (!callTicketmasterAPI.rateLimits) {
     callTicketmasterAPI.rateLimits = {
       window: 60 * 1000, // 1 minute window
-      maxPerWindow: 2000, // Massively increased for 1000+ events with unique sessions
+      maxPerWindow: 2000, // High limit for 1000+ events
       requests: [], // Array to track request timestamps
       lastWarning: 0
     };
@@ -1020,18 +930,10 @@ async function callTicketmasterAPI(facetHeader, proxyAgent, eventId, event, mapH
     await delay(dynamicDelay);
   }
   
-  // Enhanced request with better error handling
-  const makeRequestWithRetry = async (url, headers, agent, attemptNum = 0, isRetryWithNewProxy = false) => {
-    const jitter = 1 + (Math.random() * jitterFactor * 2 - jitterFactor);
-    const delayMs = Math.min(maxDelayMs, baseDelayMs * Math.pow(2, attemptNum)) * jitter;
-    
-    if (attemptNum > 0) {
-      await delay(delayMs);
-      console.log(`Retry attempt ${attemptNum} for event ${eventId} after ${delayMs.toFixed(0)}ms`);
-    }
-    
+  // Simple request function without retries
+  const makeRequest = async (url, headers, agent) => {
     try {
-      // Add minimal delay for 1000+ events processing
+      // Add minimal delay for natural behavior
       await delay(10 + Math.random() * 40);
       
       // Construct a safe copy of headers without any possible circular references
@@ -1042,55 +944,7 @@ async function callTicketmasterAPI(facetHeader, proxyAgent, eventId, event, mapH
         }
       }
       
-      // Randomly modify browser fingerprint on retries to avoid detection
-      if (attemptNum > 0) {
-        // Generate a new random user agent
-        const randomUA = randomUseragent.getRandom(function(ua) {
-          return ua.browserName === 'Chrome' || ua.browserName === 'Firefox';
-        });
-        
-        if (randomUA) {
-          safeHeaders['User-Agent'] = randomUA;
-        }
-        
-        // Add realistic browser-specific headers
-        const browserSpecificHeaders = Math.random() > 0.5 ? {
-          'sec-ch-ua': '"Chromium";v="116", "Google Chrome";v="116", "Not=A?Brand";v="99"',
-          'sec-ch-ua-mobile': '?0',
-          'sec-ch-ua-platform': '"Windows"'
-        } : {
-          'sec-ch-ua': '"Firefox";v="115", "Gecko";v="115"',
-          'sec-ch-ua-mobile': '?0',
-          'sec-ch-ua-platform': '"Windows"'
-        };
-        
-        Object.assign(safeHeaders, browserSpecificHeaders);
-        
-        // Add small variations in Accept headers to make it look more natural
-        const acceptVariations = [
-          '*/*',
-          'application/json, text/plain, */*',
-          'application/json, text/javascript, */*; q=0.01'
-        ];
-        safeHeaders['Accept'] = acceptVariations[Math.floor(Math.random() * acceptVariations.length)];
-        
-        // Vary the order of common headers to avoid fingerprinting
-        const headerOrder = {};
-        const commonHeaderKeys = ['Accept', 'Accept-Language', 'Accept-Encoding', 'User-Agent', 'Referer', 'Origin', 'X-Api-Key'];
-        const shuffledKeys = commonHeaderKeys.sort(() => Math.random() - 0.5);
-        
-        shuffledKeys.forEach(key => {
-          if (safeHeaders[key]) {
-            headerOrder[key] = safeHeaders[key];
-            delete safeHeaders[key];
-          }
-        });
-        
-        // Re-add the headers in a random order
-        Object.assign(safeHeaders, headerOrder);
-      }
-      
-      // Use throttled request to make calls look more natural
+      // Use throttled request
       return await throttledRequest({
         url,
         agent: {
@@ -1098,90 +952,15 @@ async function callTicketmasterAPI(facetHeader, proxyAgent, eventId, event, mapH
         },
         headers: safeHeaders,
         timeout: {
-          request: 30000 // Increased from 15000 for better success rate
+          request: 30000
         },
         responseType: 'json',
         retry: {
-          limit: 2, // We handle retries ourselves
-          methods: ['GET'],
-          statusCodes: [408, 413, 429, 500, 502, 503, 504],
-          errorCodes: ['ETIMEDOUT', 'ECONNRESET', 'EADDRINUSE', 'ECONNREFUSED', 'EPIPE', 'ENOTFOUND']
+          limit: 0 // No retries, fail fast
         }
       });
     } catch (error) {
-      const is403Error = error.response?.statusCode === 403;
-      const is429Error = error.response?.statusCode === 429;
-      const is500Error = error.response?.statusCode >= 500 && error.response?.statusCode < 600;
-      
-      // Track proxy errors
-      if (agent && (is403Error || is429Error)) {
-        // Create a non-circular key for the proxy without JSON.stringify
-        const proxyKey = agent.proxy?.host || 'unknown-proxy';
-        proxyErrors.set(proxyKey, (proxyErrors.get(proxyKey) || 0) + 1);
-      }
-      
-      // If we've hit a rate limit, wait longer before retrying
-      if (is429Error) {
-        const retryAfter = error.response?.headers?.['retry-after'] || 30; 
-        const waitTime = parseInt(retryAfter, 10) * 1000 || 30000;
-        console.log(`Rate limited (429) for event ${eventId}, waiting ${waitTime/1000}s before retry`);
-        await delay(waitTime);
-      }
-      
-      // For 403 errors, we should try with a new proxy before giving up
-      if (is403Error && !isRetryWithNewProxy && attemptNum < 2) {
-        console.log(`403 error with proxy ${agent.proxy?.host || 'unknown'}, retrying with new proxy`);
-        
-        try {
-          // Get a new proxy
-          let newAgent;
-          
-          if (global.proxyManager) {
-            // Release the old proxy with error
-            if (agent && agent.proxy) {
-              global.proxyManager.releaseProxy(eventId, false, error);
-            }
-
-            // Get a fresh proxy from ProxyManager
-            const proxyData = global.proxyManager.getProxyForEvent(eventId);
-            if (proxyData) {
-              const proxyAgentData =
-                global.proxyManager.createProxyAgent(proxyData);
-              newAgent = proxyAgentData.proxyAgent;
-            } else {
-              // Fallback
-              const proxyData = await GetProxy();
-              newAgent = proxyData.proxyAgent;
-            }
-          } else {
-            // Fallback to old method
-            const proxyData = await GetProxy();
-            newAgent = proxyData.proxyAgent;
-          }
-          
-          // Wait before retry with increasing backoff
-          await delay(2000 + Math.random() * 2000 + attemptNum * 1000);
-          
-          // Try again with new proxy
-          return makeRequestWithRetry(url, headers, newAgent, attemptNum + 1, true);
-        } catch (proxyError) {
-          console.error(`Failed to get new proxy for 403 retry: ${proxyError.message}`);
-          throw error; // Rethrow original error if we can't get a new proxy
-        }
-      }
-      
-      // For network errors or server errors, retry a few times
-      if ((error.code === 'ECONNRESET' || error.code === 'ETIMEDOUT' || is500Error) && attemptNum < 2) {
-        console.log(`Network/server error (${error.message}), retrying request (${attemptNum + 1})`);
-        
-        // Add back-off delay
-        const delay = 1000 * Math.pow(2, attemptNum) + Math.random() * 1000;
-        await new Promise(resolve => setTimeout(resolve, delay));
-        
-        return makeRequestWithRetry(url, headers, agent, attemptNum + 1, isRetryWithNewProxy);
-      }
-      
-      // Otherwise, rethrow
+      // Just throw the error, no retry logic
       throw error;
     }
   };
@@ -1216,48 +995,28 @@ async function callTicketmasterAPI(facetHeader, proxyAgent, eventId, event, mapH
       }
     }
     
-    // Randomize request order to be less predictable
-    const randomizeOrder = Math.random() > 0.5;
+    // Make single attempts at both API calls
     let DataMap, DataFacets;
     
-    // Wrap each API call in a try-catch to handle them independently
-    if (randomizeOrder) {
-      try {
-        const mapResponse = await makeRequestWithRetry(mapUrlWithParams, safeMapHeader || safeFacetHeader, proxyAgent);
-        DataMap = mapResponse.body || mapResponse;
-      } catch (mapError) {
-        console.error(`Map API error for event ${eventId}:`, mapError.message);
-        DataMap = null;
-      }
-      
-      // Add minimal delay between requests for 1000+ events
-      await delay(50 + Math.random() * 200);
-      
-      try {
-        const facetResponse = await makeRequestWithRetry(facetUrlWithParams, safeFacetHeader, proxyAgent);
-        DataFacets = facetResponse.body || facetResponse;
-      } catch (facetError) {
-        console.error(`Facet API error for event ${eventId}:`, facetError.message);
-        DataFacets = null;
-      }
-    } else {
-      try {
-        const facetResponse = await makeRequestWithRetry(facetUrlWithParams, safeFacetHeader, proxyAgent);
-        DataFacets = facetResponse.body || facetResponse;
-      } catch (facetError) {
-        console.error(`Facet API error for event ${eventId}:`, facetError.message);
-        DataFacets = null;
-      }
-      
-      await delay(500 + Math.random() * 2000);
-      
-      try {
-        const mapResponse = await makeRequestWithRetry(mapUrlWithParams, safeMapHeader || safeFacetHeader, proxyAgent);
-        DataMap = mapResponse.body || mapResponse;
-      } catch (mapError) {
-        console.error(`Map API error for event ${eventId}:`, mapError.message);
-        DataMap = null;
-      }
+    // Try map API
+    try {
+      const mapResponse = await makeRequest(mapUrlWithParams, safeMapHeader || safeFacetHeader, proxyAgent);
+      DataMap = mapResponse.body || mapResponse;
+    } catch (mapError) {
+      console.log(`Map API failed for event ${eventId}: ${mapError.message}`);
+      DataMap = null;
+    }
+    
+    // Add minimal delay between requests
+    await delay(50 + Math.random() * 200);
+    
+    // Try facet API
+    try {
+      const facetResponse = await makeRequest(facetUrlWithParams, safeFacetHeader, proxyAgent);
+      DataFacets = facetResponse.body || facetResponse;
+    } catch (facetError) {
+      console.log(`Facet API failed for event ${eventId}: ${facetError.message}`);
+      DataFacets = null;
     }
     
     if (!DataFacets && !DataMap) {
@@ -1266,11 +1025,11 @@ async function callTicketmasterAPI(facetHeader, proxyAgent, eventId, event, mapH
     
     // Allow processing to continue even if one API call failed
     if (!DataFacets) {
-      console.warn(`Proceeding with event ${eventId} using only map data`);
+      console.log(`Processing event ${eventId} with map data only`);
     }
     
     if (!DataMap) {
-      console.warn(`Proceeding with event ${eventId} using only facet data`);
+      console.log(`Processing event ${eventId} with facet data only`);
     }
     
     console.log(`API requests completed for event ${eventId} in ${Date.now() - startTime}ms`);
@@ -1286,7 +1045,6 @@ async function callTicketmasterAPI(facetHeader, proxyAgent, eventId, event, mapH
       );
     } catch (processError) {
       console.error(`Error processing API response for event ${eventId}:`, processError.message);
-      // If we can't process the data, return null so calling function knows to handle it
       return null;
     }
   } catch (error) {
