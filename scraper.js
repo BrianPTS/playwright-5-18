@@ -469,27 +469,6 @@ async function refreshHeaders(eventId, proxy, existingCookies = null) {
   }
 }
 
-// Generate fallback headers to use when proper cookies can't be obtained
-function generateFallbackHeaders() {
-  const fingerprint = BrowserFingerprint.generate();
-  const userAgent = BrowserFingerprint.generateUserAgent(fingerprint);
-  
-  return {
-    "User-Agent": userAgent,
-    "Accept": "application/json, text/plain, */*",
-    "Accept-Language": "en-US,en;q=0.9",
-    "Accept-Encoding": "gzip, deflate, br",
-    "Connection": "keep-alive",
-    "Referer": "https://www.ticketmaster.com/",
-    "Sec-Fetch-Dest": "empty",
-    "Sec-Fetch-Mode": "cors",
-    "Sec-Fetch-Site": "same-origin",
-    "Pragma": "no-cache",
-    "Cache-Control": "no-cache",
-    "x-tm-api-key": "b462oi7fic6pehcdkzony5bxhe",
-  };
-}
-
 
 const throttle = pThrottle({
   limit: 50, // Increased from 50 for even higher volume
@@ -818,18 +797,35 @@ const ScrapeEvent = async (
       }
     }
 
-    // Generate enhanced headers using our improved function
-    const enhancedHeaders = generateEnhancedHeaders(fingerprint, cookieString);
+    // Define API URLs for header optimization
+    const mapUrl = `https://mapsapi.tmol.io/maps/geometry/3/event/${eventId}/placeDetailNoKeys?useHostGrids=true&app=CCP&sectionLevel=true&systemId=HOST`;
+    const facetUrl = `https://services.ticketmaster.com/api/ismds/event/${eventId}/facets?by=section+shape+attributes+available+accessibility+offer+inventoryTypes+offerTypes+description&show=places+inventoryTypes+offerTypes&embed=offer&embed=description&q=available&compress=places&resaleChannelId=internal.ecommerce.consumer.desktop.web.browser.ticketmaster.us&apikey=b462oi7fic6pehcdkzony5bxhe&apisecret=pquzpfrfz7zd2ylvtz3w5dtyse`;
+
+    // Generate API-specific headers using our improved rotation system
+    const mapHeaders = HeaderRotation.getRotatedHeaders(fingerprint, cookieString, mapUrl);
+    const facetHeaders = HeaderRotation.getRotatedHeaders(fingerprint, cookieString, facetUrl);
+
+    // Validate and fix headers
+    const validatedMapHeaders = HeaderValidator.fixHeaders(mapHeaders, mapUrl);
+    const validatedFacetHeaders = HeaderValidator.fixHeaders(facetHeaders, facetUrl);
+
+    // Log header quality for monitoring
+    const mapScore = HeaderValidator.getQualityScore(validatedMapHeaders, mapUrl);
+    const facetScore = HeaderValidator.getQualityScore(validatedFacetHeaders, facetUrl);
+    
+    if (mapScore < 80 || facetScore < 80) {
+      console.log(`Header quality - Map: ${mapScore}, Facet: ${facetScore} for event ${eventId}`);
+    }
 
     // Create safe header objects that match the expected format
     const MapHeader = {
-      ...enhancedHeaders,
+      ...validatedMapHeaders,
       "X-Request-ID": generateCorrelationId() + `-${Date.now()}`,
       "X-Correlation-ID": correlationId,
     };
 
     const FacetHeader = {
-      ...enhancedHeaders,
+      ...validatedFacetHeaders,
       "tmps-correlation-id": correlationId,
       "X-Api-Key": "b462oi7fic6pehcdkzony5bxhe",
       "X-Request-ID": generateCorrelationId() + `-${Date.now()}`,
@@ -1539,8 +1535,8 @@ const simulateEnhancedHumanBehavior = async (page) => {
   }
 }
 
-// Enhanced request headers
-const generateEnhancedHeaders = (fingerprint, cookies) => {
+// Enhanced request headers with improved anti-detection
+const generateEnhancedHeaders = (fingerprint, cookies, url = null) => {
   try {
     // Ensure we have valid inputs
     if (!fingerprint) {
@@ -1551,112 +1547,344 @@ const generateEnhancedHeaders = (fingerprint, cookies) => {
       cookies = '';
     }
     
-    // Trim cookies to 569 characters if longer
-    cookies = trimCookieString(cookies, 569);
+    // Trim cookies to maintain optimal length
+    cookies = trimCookieString(cookies, 8000); // Increased for better auth
 
-    // Get appropriate user agent - either from fingerprint or generate new one
+    // Get current timestamp for realistic headers
+    const now = new Date();
+    const timestamp = now.getTime();
+    
+    // Determine request type based on URL
+    const isMapAPI = url && url.includes('mapsapi.tmol.io');
+    const isFacetAPI = url && url.includes('services.ticketmaster.com');
+    
+    // Get appropriate user agent with version variations
     let userAgent;
     if (fingerprint.browser?.userAgent) {
       userAgent = fingerprint.browser.userAgent;
     } else if (fingerprint.browser?.name) {
-      userAgent = randomUseragent.getRandom(ua => ua.browserName === fingerprint.browser.name);
+      userAgent = generateRealisticUserAgent(fingerprint.browser.name, fingerprint.platform?.name);
     } else {
-      userAgent = randomUseragent.getRandom(ua => ua.browserName === 'Chrome');
+      userAgent = generateRealisticUserAgent('Chrome', 'Windows');
     }
 
     const browserName = fingerprint.browser?.name || 'Chrome';
-    const browserVersion = fingerprint.browser?.version || '116.0.0.0';
+    const browserVersion = fingerprint.browser?.version || getLatestBrowserVersion(browserName);
     const platformName = fingerprint.platform?.name || 'Windows';
     
-    // Generate appropriate sec-ch-ua headers based on browser
-    let secChUa;
-    if (browserName === 'Chrome') {
-      secChUa = `"Not A(Brand";v="99", "Google Chrome";v="${browserVersion.split('.')[0]}", "Chromium";v="${browserVersion.split('.')[0]}"`;
-    } else if (browserName === 'Firefox') {
-      secChUa = `"Firefox";v="${browserVersion.split('.')[0]}"`;
-    } else if (browserName === 'Edge') {
-      secChUa = `"Microsoft Edge";v="${browserVersion.split('.')[0]}", "Chromium";v="${browserVersion.split('.')[0]}"`;
-    } else if (browserName === 'Safari') {
-      secChUa = `"Safari";v="${browserVersion.split('.')[0]}"`;
-    } else {
-      secChUa = `"Not_A Brand";v="8", "${browserName}";v="${browserVersion.split('.')[0]}"`;
-    }
+    // Generate browser-specific sec-ch-ua headers with realistic versions
+    let secChUa = generateSecChUaHeader(browserName, browserVersion);
     
-    // Generate platform string
-    const secChUaPlatform = platformName === 'Windows' ? 'Windows' : 
-                           platformName === 'Mac OS X' ? 'macOS' : 
-                           platformName === 'iPhone' ? 'iOS' : 
-                           platformName === 'Android' ? 'Android' : 'Windows';
+    // Generate platform string with proper formatting
+    const secChUaPlatform = generatePlatformHeader(platformName);
 
-    // Mobile detection
-    const isMobile = fingerprint.platform?.type === 'mobile' || false;
+    // Mobile detection with proper mobile headers
+    const isMobile = fingerprint.platform?.type === 'mobile' || userAgent.includes('Mobile');
     const secChUaMobile = isMobile ? '?1' : '?0';
 
-    // Preferred language
+    // Enhanced language preferences with realistic variations
     const language = fingerprint.language || 'en-US';
+    const acceptLanguage = generateAcceptLanguageHeader(language);
+
+    // Browser-specific accept encoding
+    const acceptEncoding = generateAcceptEncodingHeader(browserName);
+
+    // Dynamic cache control based on request type
+    const cacheControl = generateCacheControlHeader(isMapAPI, isFacetAPI);
+
+    // Generate realistic Accept header based on API type
+    const acceptHeader = generateAcceptHeader(isMapAPI, isFacetAPI);
+
+    // Generate referer based on realistic user flow
+    const referer = generateRealisticReferer(url);
+
+    // Build headers object with proper ordering
+    const headers = {};
     
-    // Choose varied accept language formats
-    let acceptLanguage;
-    if (language === 'en-US') {
-      acceptLanguage = Math.random() > 0.5 ? 'en-US,en;q=0.9' : 'en-US,en;q=0.9,en-GB;q=0.8';
-    } else if (language === 'en-GB') {
-      acceptLanguage = Math.random() > 0.5 ? 'en-GB,en;q=0.9' : 'en-GB,en;q=0.9,en-US;q=0.8';
-    } else {
-      acceptLanguage = `${language},en;q=0.9`;
+    // Core browser headers (order matters for fingerprinting)
+    headers['User-Agent'] = userAgent;
+    headers['Accept'] = acceptHeader;
+    headers['Accept-Language'] = acceptLanguage;
+    headers['Accept-Encoding'] = acceptEncoding;
+    
+    // Security and fetch headers for Chromium-based browsers
+    if (browserName === 'Chrome' || browserName === 'Edge') {
+      headers['sec-ch-ua'] = secChUa;
+      headers['sec-ch-ua-mobile'] = secChUaMobile;
+      headers['sec-ch-ua-platform'] = secChUaPlatform;
+      
+      // Add realistic sec-ch-ua-bitness for modern Chrome
+      if (platformName === 'Windows' && Math.random() > 0.3) {
+        headers['sec-ch-ua-bitness'] = '"64"';
+      }
+      
+      // Add sec-ch-ua-full-version-list occasionally for newer Chrome versions
+      if (parseInt(browserVersion.split('.')[0]) >= 98 && Math.random() > 0.7) {
+        headers['sec-ch-ua-full-version-list'] = generateFullVersionList(browserName, browserVersion);
+      }
     }
-
-    // Randomize accept encoding based on browser
-    let acceptEncoding;
+    
+    // Fetch API headers
+    headers['Sec-Fetch-Dest'] = isMapAPI ? 'empty' : 'empty';
+    headers['Sec-Fetch-Mode'] = 'cors';
+    headers['Sec-Fetch-Site'] = isMapAPI ? 'cross-site' : 'same-site';
+    
+    // Navigation and origin headers
+    if (referer) {
+      headers['Referer'] = referer;
+    }
+    
+    if (!isMapAPI) {
+      headers['Origin'] = 'https://www.ticketmaster.com';
+    }
+    
+    // Connection management
+    headers['Connection'] = Math.random() > 0.8 ? 'close' : 'keep-alive';
+    
+    // Cache and pragma headers
+    headers['Cache-Control'] = cacheControl;
+    headers['Pragma'] = 'no-cache';
+    
+    // Cookie handling
+    if (cookies) {
+      headers['Cookie'] = cookies;
+    }
+    
+    // API-specific headers
+    if (isFacetAPI || isMapAPI) {
+      headers['X-Api-Key'] = 'b462oi7fic6pehcdkzony5bxhe';
+    }
+    
+    // AJAX indicators
+    if (Math.random() > 0.5) {
+      headers['X-Requested-With'] = 'XMLHttpRequest';
+    }
+    
+    // Privacy headers (occasionally)
+    if (Math.random() > 0.6) {
+      headers['DNT'] = Math.random() > 0.5 ? '1' : '0';
+    }
+    
+    // Add realistic request ID for tracking
+    if (Math.random() > 0.7) {
+      headers['X-Request-ID'] = generateRequestId();
+    }
+    
+    // Add realistic client info occasionally
+    if (Math.random() > 0.8) {
+      headers['X-Client-Version'] = '2.0.0';
+      headers['X-Client-Platform'] = 'web';
+    }
+    
+    // Browser-specific additional headers
     if (browserName === 'Firefox') {
-      acceptEncoding = 'gzip, deflate, br';
+      // Firefox doesn't send sec-ch-ua headers
+      delete headers['sec-ch-ua'];
+      delete headers['sec-ch-ua-mobile'];
+      delete headers['sec-ch-ua-platform'];
+      delete headers['sec-ch-ua-bitness'];
+      delete headers['sec-ch-ua-full-version-list'];
     } else if (browserName === 'Safari') {
-      acceptEncoding = 'gzip, deflate';
-    } else {
-      acceptEncoding = 'gzip, deflate, br';
+      // Safari has different behavior
+      delete headers['sec-ch-ua'];
+      delete headers['sec-ch-ua-mobile'];
+      delete headers['sec-ch-ua-platform'];
+      delete headers['sec-ch-ua-bitness'];
+      delete headers['sec-ch-ua-full-version-list'];
+      
+      // Safari-specific headers
+      if (Math.random() > 0.7) {
+        headers['X-Requested-With'] = 'XMLHttpRequest';
+      }
     }
-
-    const headers = {
-      'User-Agent': userAgent,
-      'Accept': ['*/*', 'application/json, text/plain, */*', 'application/json, text/javascript, */*; q=0.01'][Math.floor(Math.random() * 3)],
-      'Accept-Language': acceptLanguage,
-      'Accept-Encoding': acceptEncoding,
-      'Connection': Math.random() > 0.3 ? 'keep-alive' : 'close',
-      'Referer': 'https://www.ticketmaster.com/',
-      'Origin': 'https://www.ticketmaster.com',
-      'sec-ch-ua': secChUa,
-      'sec-ch-ua-mobile': secChUaMobile,
-      'sec-ch-ua-platform': `"${secChUaPlatform}"`,
-      'Sec-Fetch-Dest': 'empty',
-      'Sec-Fetch-Mode': 'cors',
-      'Sec-Fetch-Site': 'same-site',
-      'Pragma': 'no-cache',
-      'Cache-Control': Math.random() > 0.5 ? 'no-cache, no-store, must-revalidate' : 'no-store, max-age=0',
-      'Cookie': cookies,
-      'X-Requested-With': 'XMLHttpRequest',
-      'X-Api-Key': 'b462oi7fic6pehcdkzony5bxhe',
-      'DNT': Math.random() > 0.7 ? '1' : '0',
-    };
     
     return headers;
   } catch (error) {
     console.error('Error generating enhanced headers:', error);
-    // Return a basic set of headers as fallback
-    return {
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-      'Accept': '*/*',
-      'Accept-Language': 'en-US,en;q=0.9',
-      'Accept-Encoding': 'gzip, deflate, br',
-      'Connection': 'keep-alive',
-      'Referer': 'https://www.ticketmaster.com/',
-      'Origin': 'https://www.ticketmaster.com',
-      'X-Api-Key': 'b462oi7fic6pehcdkzony5bxhe',
-      'Cookie': trimCookieString(cookies || '', 569),
-    };
+    // Return comprehensive fallback headers
+    return generateFallbackHeaders(cookies);
   }
 };
 
+// Helper functions for header generation
+function generateRealisticUserAgent(browserName, platformName) {
+  const platform = platformName || 'Windows';
+  const userAgents = {
+    'Chrome': [
+      `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36`,
+      `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36`,
+      `Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36`,
+      `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36`
+    ],
+    'Firefox': [
+      `Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0`,
+      `Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:121.0) Gecko/20100101 Firefox/121.0`,
+      `Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:120.0) Gecko/20100101 Firefox/120.0`
+    ],
+    'Edge': [
+      `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0`,
+      `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36 Edg/119.0.0.0`
+    ],
+    'Safari': [
+      `Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15`,
+      `Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Safari/605.1.15`
+    ]
+  };
+  
+  const agents = userAgents[browserName] || userAgents['Chrome'];
+  return agents[Math.floor(Math.random() * agents.length)];
+}
+
+function getLatestBrowserVersion(browserName) {
+  const versions = {
+    'Chrome': '121.0.6167.85',
+    'Firefox': '121.0',
+    'Edge': '121.0.2277.83',
+    'Safari': '17.1'
+  };
+  return versions[browserName] || versions['Chrome'];
+}
+
+function generateSecChUaHeader(browserName, browserVersion) {
+  const majorVersion = browserVersion.split('.')[0];
+  
+  switch (browserName) {
+    case 'Chrome':
+      return `"Not_A Brand";v="8", "Chromium";v="${majorVersion}", "Google Chrome";v="${majorVersion}"`;
+    case 'Edge':
+      return `"Not_A Brand";v="8", "Chromium";v="${majorVersion}", "Microsoft Edge";v="${majorVersion}"`;
+    case 'Firefox':
+      return `"Firefox";v="${majorVersion}"`;
+    default:
+      return `"Not_A Brand";v="8", "Chromium";v="${majorVersion}", "Google Chrome";v="${majorVersion}"`;
+  }
+}
+
+function generatePlatformHeader(platformName) {
+  const platformMap = {
+    'Windows': 'Windows',
+    'Mac OS X': 'macOS',
+    'iPhone': 'iOS',
+    'Android': 'Android',
+    'Linux': 'Linux'
+  };
+  return `"${platformMap[platformName] || 'Windows'}"`;
+}
+
+function generateAcceptLanguageHeader(language) {
+  const variations = {
+    'en-US': [
+      'en-US,en;q=0.9',
+      'en-US,en;q=0.9,en-GB;q=0.8',
+      'en-US,en;q=0.9,es;q=0.8,de;q=0.7',
+      'en-US,en;q=0.9,fr;q=0.8'
+    ],
+    'en-GB': [
+      'en-GB,en;q=0.9',
+      'en-GB,en;q=0.9,en-US;q=0.8',
+      'en-GB,en;q=0.9,fr;q=0.8,de;q=0.7'
+    ]
+  };
+  
+  const options = variations[language] || variations['en-US'];
+  return options[Math.floor(Math.random() * options.length)];
+}
+
+function generateAcceptEncodingHeader(browserName) {
+  switch (browserName) {
+    case 'Firefox':
+      return 'gzip, deflate, br';
+    case 'Safari':
+      return 'gzip, deflate, br';
+    default:
+      return 'gzip, deflate, br, zstd';
+  }
+}
+
+function generateCacheControlHeader(isMapAPI, isFacetAPI) {
+  const options = [
+    'no-cache',
+    'no-cache, no-store',
+    'no-cache, no-store, must-revalidate',
+    'max-age=0, no-cache'
+  ];
+  return options[Math.floor(Math.random() * options.length)];
+}
+
+function generateAcceptHeader(isMapAPI, isFacetAPI) {
+  if (isMapAPI) {
+    return 'application/json, text/plain, */*';
+  } else if (isFacetAPI) {
+    const options = [
+      'application/json, text/plain, */*',
+      'application/json, text/javascript, */*; q=0.01',
+      '*/*'
+    ];
+    return options[Math.floor(Math.random() * options.length)];
+  }
+  return '*/*';
+}
+
+function generateRealisticReferer(url) {
+  const referers = [
+    'https://www.ticketmaster.com/',
+    'https://www.ticketmaster.com/search',
+    'https://www.ticketmaster.com/browse',
+    'https://concerts.ticketmaster.com/',
+    null // Sometimes no referer
+  ];
+  
+  // 80% chance of having a referer
+  if (Math.random() > 0.2) {
+    return referers[Math.floor(Math.random() * (referers.length - 1))];
+  }
+  return null;
+}
+
+function generateFullVersionList(browserName, browserVersion) {
+  if (browserName === 'Chrome') {
+    return `"Not_A Brand";v="8.0.0.0", "Chromium";v="${browserVersion}", "Google Chrome";v="${browserVersion}"`;
+  } else if (browserName === 'Edge') {
+    return `"Not_A Brand";v="8.0.0.0", "Chromium";v="${browserVersion}", "Microsoft Edge";v="${browserVersion}"`;
+  }
+  return '';
+}
+
+function generateRequestId() {
+  return 'req_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+}
+
+function generateFallbackHeaders(cookies) {
+  return {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+    'Accept': 'application/json, text/plain, */*',
+    'Accept-Language': 'en-US,en;q=0.9',
+    'Accept-Encoding': 'gzip, deflate, br',
+    'Connection': 'keep-alive',
+    'Referer': 'https://www.ticketmaster.com/',
+    'Origin': 'https://www.ticketmaster.com',
+    'sec-ch-ua': '"Not_A Brand";v="8", "Chromium";v="121", "Google Chrome";v="121"',
+    'sec-ch-ua-mobile': '?0',
+    'sec-ch-ua-platform': '"Windows"',
+    'Sec-Fetch-Dest': 'empty',
+    'Sec-Fetch-Mode': 'cors',
+    'Sec-Fetch-Site': 'same-site',
+    'Pragma': 'no-cache',
+    'Cache-Control': 'no-cache, no-store, must-revalidate',
+    'X-Api-Key': 'b462oi7fic6pehcdkzony5bxhe',
+    'Cookie': trimCookieString(cookies || '', 8000),
+  };
+}
+
 /**
  * Trims a cookie string to a specified maximum length while preserving complete cookies
+ * @param {string} cookieString - The cookie string to trim
+ * @param {number} maxLength - Maximum length for the cookie string
+ * @returns {string} - Trimmed cookie string
+ */
+/**
+ * Trims a cookie string to a specified maximum length while preserving complete cookies
+ * Prioritizes essential authentication cookies
  * @param {string} cookieString - The cookie string to trim
  * @param {number} maxLength - Maximum length for the cookie string
  * @returns {string} - Trimmed cookie string
@@ -1667,27 +1895,56 @@ function trimCookieString(cookieString, maxLength) {
     return cookieString;
   }
   
+  // Essential cookies that should be prioritized
+  const essentialCookies = [
+    'TMUO', 'TMPS', 'TM_TKTS', 'SESSION', 'audit', // Auth cookies
+    'CMPS', 'CMID', 'MUID', 'au_id', 'aud', // Identity cookies
+    'tmTrackID', 'TapAd_DID', 'uid' // Tracking cookies
+  ];
+  
   // Split the cookie string into individual cookies
   const cookies = cookieString.split('; ');
-  let result = '';
+  const cookieMap = new Map();
   
-  // Add cookies until we reach the maximum length
+  // Parse cookies into a map
   for (const cookie of cookies) {
-    // Check if adding this cookie would exceed the max length
-    if ((result + cookie).length + (result ? 2 : 0) > maxLength) {
-      break;
+    const [name, value] = cookie.split('=');
+    if (name && value) {
+      cookieMap.set(name.trim(), value.trim());
     }
-    
-    // Add cookie separator if needed
-    if (result) {
-      result += '; ';
-    }
-    
-    // Add the cookie
-    result += cookie;
   }
   
-  return result;
+  const resultCookies = [];
+  let currentLength = 0;
+  
+  // First, add essential cookies
+  for (const essentialName of essentialCookies) {
+    if (cookieMap.has(essentialName)) {
+      const cookieStr = `${essentialName}=${cookieMap.get(essentialName)}`;
+      const additionalLength = currentLength > 0 ? cookieStr.length + 2 : cookieStr.length; // +2 for "; "
+      
+      if (currentLength + additionalLength <= maxLength) {
+        resultCookies.push(cookieStr);
+        currentLength += additionalLength;
+        cookieMap.delete(essentialName); // Remove from map so we don't add it again
+      }
+    }
+  }
+  
+  // Then add remaining cookies if there's space
+  for (const [name, value] of cookieMap.entries()) {
+    const cookieStr = `${name}=${value}`;
+    const additionalLength = currentLength > 0 ? cookieStr.length + 2 : cookieStr.length;
+    
+    if (currentLength + additionalLength <= maxLength) {
+      resultCookies.push(cookieStr);
+      currentLength += additionalLength;
+    } else {
+      break; // No more space
+    }
+  }
+  
+  return resultCookies.join('; ');
 }
 
 
@@ -1700,7 +1957,240 @@ function resetCapturedState() {
   };
 }
 
-export { ScrapeEvent, refreshHeaders, generateEnhancedHeaders, refreshCookiesPeriodically };
+// Header rotation system for better anti-detection
+const HeaderRotation = {
+  pools: new Map(),
+  maxPoolSize: 20,
+  rotationInterval: 5 * 60 * 1000, // 5 minutes
+  
+  // Get a rotated header set
+  getRotatedHeaders(fingerprint, cookies, url) {
+    const poolKey = this.getPoolKey(fingerprint);
+    
+    if (!this.pools.has(poolKey)) {
+      this.pools.set(poolKey, {
+        headers: [],
+        lastRotation: Date.now(),
+        index: 0
+      });
+    }
+    
+    const pool = this.pools.get(poolKey);
+    
+    // Rotate headers if enough time has passed or pool is empty
+    if (Date.now() - pool.lastRotation > this.rotationInterval || pool.headers.length === 0) {
+      this.generateHeaderPool(pool, fingerprint, cookies, url);
+      pool.lastRotation = Date.now();
+      pool.index = 0;
+    }
+    
+    // Get next header set from pool
+    const headers = pool.headers[pool.index % pool.headers.length];
+    pool.index++;
+    
+    return headers;
+  },
+  
+  // Generate a pool of header variations
+  generateHeaderPool(pool, fingerprint, cookies, url) {
+    pool.headers = [];
+    
+    for (let i = 0; i < this.maxPoolSize; i++) {
+      // Create slight variations of the fingerprint
+      const variantFingerprint = this.createFingerprintVariant(fingerprint);
+      const headers = generateEnhancedHeaders(variantFingerprint, cookies, url);
+      
+      // Add slight header variations
+      this.addHeaderVariations(headers);
+      
+      pool.headers.push(headers);
+    }
+  },
+  
+  // Create fingerprint variants
+  createFingerprintVariant(baseFingerprint) {
+    const variant = JSON.parse(JSON.stringify(baseFingerprint));
+    
+    // Vary browser version slightly
+    if (variant.browser?.version) {
+      const versionParts = variant.browser.version.split('.');
+      if (versionParts.length > 2) {
+        // Increment patch version randomly
+        versionParts[2] = String(parseInt(versionParts[2]) + Math.floor(Math.random() * 5));
+        variant.browser.version = versionParts.join('.');
+      }
+    }
+    
+    // Vary screen resolution slightly
+    if (variant.screen) {
+      const resolutions = [
+        {width: 1920, height: 1080},
+        {width: 1366, height: 768},
+        {width: 2560, height: 1440},
+        {width: 1280, height: 720},
+        {width: 1440, height: 900}
+      ];
+      const randomRes = resolutions[Math.floor(Math.random() * resolutions.length)];
+      variant.screen.width = randomRes.width;
+      variant.screen.height = randomRes.height;
+    }
+    
+    return variant;
+  },
+  
+  // Add small variations to headers
+  addHeaderVariations(headers) {
+    // Vary connection type occasionally
+    if (Math.random() > 0.7) {
+      headers['Connection'] = Math.random() > 0.5 ? 'keep-alive' : 'close';
+    }
+    
+    // Add or remove optional headers randomly
+    if (Math.random() > 0.6) {
+      headers['X-Client-Platform'] = 'web';
+    }
+    
+    if (Math.random() > 0.8) {
+      headers['X-Browser-ID'] = this.generateBrowserId();
+    }
+    
+    // Vary cache control
+    const cacheOptions = [
+      'no-cache',
+      'no-cache, no-store',
+      'no-cache, no-store, must-revalidate',
+      'max-age=0, no-cache'
+    ];
+    headers['Cache-Control'] = cacheOptions[Math.floor(Math.random() * cacheOptions.length)];
+  },
+  
+  // Generate pool key based on fingerprint
+  getPoolKey(fingerprint) {
+    const browser = fingerprint.browser?.name || 'Chrome';
+    const platform = fingerprint.platform?.name || 'Windows';
+    return `${browser}-${platform}`;
+  },
+  
+  // Generate realistic browser ID
+  generateBrowserId() {
+    return 'browser_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+  }
+};
+
+// Header validation and optimization system
+const HeaderValidator = {
+  // Validate headers for common anti-detection issues
+  validateHeaders(headers, url) {
+    const issues = [];
+    
+    // Check for required headers
+    if (!headers['User-Agent']) {
+      issues.push('Missing User-Agent header');
+    }
+    
+    if (!headers['Accept']) {
+      issues.push('Missing Accept header');
+    }
+    
+    // Check for inconsistent browser fingerprinting
+    if (headers['sec-ch-ua'] && headers['User-Agent']) {
+      const chromeInSecCh = headers['sec-ch-ua'].includes('Chrome');
+      const chromeInUA = headers['User-Agent'].includes('Chrome');
+      
+      if (chromeInSecCh !== chromeInUA) {
+        issues.push('Inconsistent Chrome detection between sec-ch-ua and User-Agent');
+      }
+    }
+    
+    // Check for suspicious header combinations
+    if (headers['sec-ch-ua'] && headers['User-Agent'].includes('Firefox')) {
+      issues.push('Firefox User-Agent with Chromium sec-ch-ua headers');
+    }
+    
+    // Check for proper API key placement
+    if (url && (url.includes('ticketmaster.com') || url.includes('tmol.io'))) {
+      if (!headers['X-Api-Key'] && !url.includes('apikey=')) {
+        issues.push('Missing API key for Ticketmaster API');
+      }
+    }
+    
+    // Check cookie length
+    if (headers['Cookie'] && headers['Cookie'].length > 8000) {
+      issues.push(`Cookie header too long: ${headers['Cookie'].length} characters`);
+    }
+    
+    return {
+      isValid: issues.length === 0,
+      issues: issues
+    };
+  },
+  
+  // Fix common header issues
+  fixHeaders(headers, url) {
+    const fixed = { ...headers };
+    
+    // Ensure User-Agent exists
+    if (!fixed['User-Agent']) {
+      fixed['User-Agent'] = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36';
+    }
+    
+    // Ensure Accept header exists
+    if (!fixed['Accept']) {
+      fixed['Accept'] = '*/*';
+    }
+    
+    // Fix Firefox with sec-ch-ua issue
+    if (fixed['User-Agent'].includes('Firefox')) {
+      delete fixed['sec-ch-ua'];
+      delete fixed['sec-ch-ua-mobile'];
+      delete fixed['sec-ch-ua-platform'];
+      delete fixed['sec-ch-ua-bitness'];
+      delete fixed['sec-ch-ua-full-version-list'];
+    }
+    
+    // Ensure proper API key
+    if (url && (url.includes('ticketmaster.com') || url.includes('tmol.io'))) {
+      if (!fixed['X-Api-Key'] && !url.includes('apikey=')) {
+        fixed['X-Api-Key'] = 'b462oi7fic6pehcdkzony5bxhe';
+      }
+    }
+    
+    // Trim cookies if too long
+    if (fixed['Cookie'] && fixed['Cookie'].length > 8000) {
+      fixed['Cookie'] = trimCookieString(fixed['Cookie'], 8000);
+    }
+    
+    return fixed;
+  },
+  
+  // Get header quality score (0-100)
+  getQualityScore(headers, url) {
+    let score = 100;
+    const validation = this.validateHeaders(headers, url);
+    
+    // Deduct points for each issue
+    score -= validation.issues.length * 10;
+    
+    // Bonus points for good practices
+    if (headers['sec-ch-ua'] && !headers['User-Agent'].includes('Firefox')) {
+      score += 5; // Modern browser headers
+    }
+    
+    if (headers['Accept-Language'] && headers['Accept-Language'].includes('q=')) {
+      score += 3; // Quality factors in language
+    }
+    
+    if (headers['Accept-Encoding'] && headers['Accept-Encoding'].includes('br')) {
+      score += 2; // Brotli compression support
+    }
+    
+    if (headers['Cookie'] && headers['Cookie'].length > 100) {
+      score += 5; // Has meaningful cookies
+    }
+    
+    return Math.max(0, Math.min(100, score));
+  }
+};
 
 // Function to periodically refresh cookies
 async function startPeriodicCookieRefresh() {
@@ -1887,3 +2377,15 @@ startPeriodicCookieRefresh().catch(error => {
   console.error('Failed to start periodic cookie refresh:', error);
   isPeriodicRefreshStarted = false; // Reset the flag on startup failure
 });
+
+// Export functions that other modules need
+export { 
+  ScrapeEvent, 
+  refreshHeaders, 
+  generateEnhancedHeaders, 
+  refreshCookiesPeriodically,
+  getCapturedData,
+  generateEnhancedFingerprint,
+  HeaderRotation,
+  HeaderValidator
+};
