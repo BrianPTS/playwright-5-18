@@ -501,6 +501,256 @@ export default {
         username: "events2020",
         password: "PWwBYlzp",
       },
+      {
+        proxy: "92.51.40.182:61234",
+        username: "events182",
+        password: "n3rSJLgH",
+      },
+      {
+        proxy: "92.51.41.138:61234",
+        username: "events394",
+        password: "athEdHg0",
+      },
+      {
+        proxy: "92.51.42.86:61234",
+        username: "events598",
+        password: "A0TjPaTO",
+      },
+      {
+        proxy: "92.51.42.198:61234",
+        username: "events710",
+        password: "nSuMmuZu",
+      },
+      {
+        proxy: "92.51.42.229:61234",
+        username: "events741",
+        password: "JJf8YaVQ",
+      },
+      {
+        proxy: "92.51.43.245:61234",
+        username: "events1013",
+        password: "OMLdR5bO",
+      },
+      {
+        proxy: "92.51.35.54:61234",
+        username: "events1590",
+        password: "vdqkL5iN",
+      },
+      {
+        proxy: "92.51.35.108:61234",
+        username: "events1644",
+        password: "ANLSuzjs",
+      },
+      {
+        proxy: "92.51.35.196:61234",
+        username: "events1732",
+        password: "zplB3syy",
+      },
+      {
+        proxy: "92.51.35.239:61234",
+        username: "events1775",
+        password: "NOG2QEbb",
+      },
+      {
+        proxy: "168.75.232.13:61234",
+        username: "events13",
+        password: "V7RBIZMk",
+      },
+      {
+        proxy: "168.75.232.95:61234",
+        username: "events95",
+        password: "Ovt5VJky",
+      },
+      {
+        proxy: "168.75.233.84:61234",
+        username: "events340",
+        password: "rovv71pu",
+      },
+      {
+        proxy: "168.75.233.95:61234",
+        username: "events351",
+        password: "iIFEPdNn",
+      },
+      {
+        proxy: "168.75.233.108:61234",
+        username: "events364",
+        password: "macj6nZL",
+      },
+      {
+        proxy: "168.75.233.237:61234",
+        username: "events493",
+        password: "S5MErVBw",
+      },
+      {
+        proxy: "168.75.224.76:61234",
+        username: "events76",
+        password: "idiD4TLy",
+      },
+      {
+        proxy: "168.75.224.182:61234",
+        username: "events182",
+        password: "tVEugpLx",
+      },
+      {
+        proxy: "168.75.225.27:61234",
+        username: "events283",
+        password: "xW8nXuyK",
+      },
+      {
+        proxy: "168.75.225.91:61234",
+        username: "events347",
+        password: "vtO445wc",
+      },
+      {
+        proxy: "168.75.226.66:61234",
+        username: "events578",
+        password: "s0zN0atx",
+      },
+      {
+        proxy: "168.75.226.109:61234",
+        username: "events621",
+        password: "tL9LcBm6",
+      },
+      {
+        proxy: "168.75.226.116:61234",
+        username: "events628",
+        password: "e1nz9jGr",
+      },
+      {
+        proxy: "168.75.226.151:61234",
+        username: "events663",
+        password: "cuWHde9k",
+      },
+      {
+        proxy: "168.75.226.217:61234",
+        username: "events729",
+        password: "nOMAM6uD",
+      },
+      {
+        proxy: "168.75.227.41:61234",
+        username: "events809",
+        password: "y5R2muwi",
+      },
+      {
+        proxy: "168.75.227.103:61234",
+        username: "events871",
+        password: "h7abDMnF",
+      },
+      {
+        proxy: "168.75.227.172:61234",
+        username: "events940",
+        password: "LcnOu6fv",
+      },
+      {
+        proxy: "168.75.227.181:61234",
+        username: "events949",
+        password: "x5FaO10d",
+      },
+      {
+        proxy: "168.75.228.94:61234",
+        username: "events1118",
+        password: "WRnPGA9t",
+      },
+      {
+        proxy: "168.75.229.41:61234",
+        username: "events1321",
+        password: "hlCVO7b3",
+      },
+      {
+        proxy: "168.75.231.22:61234",
+        username: "events1814",
+        password: "My83TGEB",
+      },
+      {
+        proxy: "168.75.231.112:61234",
+        username: "events1904",
+        password: "ieiTHtPB",
+      },
+      {
+        proxy: "168.75.231.167:61234",
+        username: "events1959",
+        password: "DwLYp7ik",
+      },
+      {
+        proxy: "168.75.234.143:61234",
+        username: "events655",
+        password: "2GfiKMxe",
+      },
+      {
+        proxy: "168.75.234.205:61234",
+        username: "events717",
+        password: "o2L2DUu3",
+      },
+      {
+        proxy: "168.75.234.241:61234",
+        username: "events753",
+        password: "JA2DgQnC",
+      },
+      {
+        proxy: "168.75.234.247:61234",
+        username: "events759",
+        password: "cBhS6vYI",
+      },
+      {
+        proxy: "168.75.235.32:61234",
+        username: "events800",
+        password: "FJpyjopi",
+      },
+      {
+        proxy: "168.75.235.125:61234",
+        username: "events893",
+        password: "X6ApPPAp",
+      },
+      {
+        proxy: "168.75.235.190:61234",
+        username: "events958",
+        password: "QciEvkjA",
+      },
+      {
+        proxy: "168.75.236.128:61234",
+        username: "events1152",
+        password: "fFIFliJT",
+      },
+      {
+        proxy: "168.75.236.176:61234",
+        username: "events1200",
+        password: "9sqotdv9",
+      },
+      {
+        proxy: "168.75.236.251:61234",
+        username: "events1275",
+        password: "JKfSteUY",
+      },
+      {
+        proxy: "168.75.237.0:61234",
+        username: "events1280",
+        password: "PNyiiPUT",
+      },
+      {
+        proxy: "168.75.237.73:61234",
+        username: "events1353",
+        password: "3BVopSsp",
+      },
+      {
+        proxy: "168.75.237.89:61234",
+        username: "events1369",
+        password: "11FUj198",
+      },
+      {
+        proxy: "168.75.237.92:61234",
+        username: "events1372",
+        password: "cBQsTnex",
+      },
+      {
+        proxy: "168.75.239.37:61234",
+        username: "events1829",
+        password: "qdHR5sCk",
+      },
+      {
+        proxy: "168.75.239.98:61234",
+        username: "events1890",
+        password: "kNCrURyA",
+      },
     
   ],
 };
