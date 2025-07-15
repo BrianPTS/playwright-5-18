@@ -2123,7 +2123,7 @@ export class ScraperManager {
     let circuitBreakerOpen = false;
     let circuitBreakerOpenTime = 0;
     const CIRCUIT_BREAKER_THRESHOLD = 8; // Open circuit after 8 consecutive failures
-    const CIRCUIT_BREAKER_TIMEOUT = 30000; // 30 seconds before trying again
+    const CIRCUIT_BREAKER_TIMEOUT = 10000; // 10 seconds before trying again
 
     while (this.isRunning) {
       try {
