@@ -164,10 +164,10 @@ export class ScraperManager {
     this.eventPriorityScores = new Map(); // Cache priority scores
     this.eventMaxRetries = new Map(); // Track dynamic retry limits per event
 
-    // Enhanced throttled ScrapeEvent for concurrent processing
+    // Enhanced throttled ScrapeEvent for high-volume concurrent processing
     this.throttledScrapeEvent = pThrottle({
-      limit: config.CONCURRENT_LIMIT, // Use config value (8-12 concurrent)
-      interval: config.PROCESSING_INTERVAL, // Use config value (500ms)
+      limit: config.CONCURRENT_LIMIT, // Use config value (50+ concurrent for 10k+ events)
+      interval: 100, // Minimal interval for maximum throughput
       strict: false, // Allow bursts for better throughput
     })(ScrapeEvent);
   }
@@ -371,8 +371,8 @@ export class ScraperManager {
 
     // For high-performance mode, use last processed time instead of update timestamps
     const lastProcessed = this.eventLastProcessedTime.get(eventId);
-    if (lastProcessed && Date.now() - lastProcessed < 30000) {
-      // Skip if processed in last 30 seconds
+    if (lastProcessed && Date.now() - lastProcessed < 5000) {
+      // Skip if processed in last 5 seconds (reduced from 30 seconds for better scalability)
       return true;
     }
 
@@ -2499,21 +2499,21 @@ export class ScraperManager {
   /**
    * Process multiple batches of 3 events in parallel for maximum throughput
    */
-  async processMultipleBatches(allEvents, maxParallelBatches = 2) {
-    if (allEvents.length <= 3) {
+  async processMultipleBatches(allEvents, maxParallelBatches = 8) {
+    if (allEvents.length <= 5) {
       // Single batch, use regular processing
       return null;
     }
 
-    const batchSize = 3;
+    const batchSize = Math.min(10, Math.ceil(allEvents.length / 4)); // Dynamic batch size up to 10
     const batches = [];
 
-    // Split events into batches of 3
+    // Split events into optimized batches
     for (let i = 0; i < allEvents.length; i += batchSize) {
       batches.push(allEvents.slice(i, i + batchSize));
     }
 
-    // Limit parallel batches to prevent overwhelming
+    // Use more parallel batches for better throughput
     const parallelBatches = Math.min(maxParallelBatches, batches.length);
 
     this.logWithTime(
@@ -2646,9 +2646,9 @@ export class ScraperManager {
       const preDelay = 200 + Math.random() * 800; // 200-1000ms
       await setTimeout(preDelay);
 
-      // Check if we should skip due to recent processing
+      // Check if we should skip due to recent processing - reduced interval for 10k+ events
       const lastProcessed = this.eventLastProcessedTime.get(eventId);
-      const minInterval = 45000 + Math.random() * 15000; // 45-60 seconds
+      const minInterval = 8000 + Math.random() * 4000; // 8-12 seconds for high volume
       if (lastProcessed && Date.now() - lastProcessed < minInterval) {
         this.logWithTime(
           `Skipping event ${eventId} - processed recently`,

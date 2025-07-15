@@ -5,13 +5,13 @@ export default {
   // Time limits - optimized for better flow
   MAX_UPDATE_INTERVAL: 120000, // Strict 2-minute update requirement
   SCRAPE_TIMEOUT: 45000, // Reduced timeout to prevent hanging (reduced from 45000)
-  MIN_TIME_BETWEEN_EVENT_SCRAPES: 10000, // Reduced from 10000 to allow faster retries
+  MIN_TIME_BETWEEN_EVENT_SCRAPES: 3000, // Reduced to 3 seconds for better scalability
   URGENT_THRESHOLD: 110000, // Events needing update within 10 seconds of deadline
-  PROCESSING_INTERVAL: 1000, // Faster processing interval (reduced from 1000ms)
+  PROCESSING_INTERVAL: 500, // Faster processing interval (reduced to 500ms for better throughput)
   
-  // Concurrency settings - optimized for 2-second intervals with higher throughput
-  CONCURRENT_LIMIT: Math.max(8, Math.floor(cpus().length * 1.5)), // Increased CPU utilization for better throughput
-  BATCH_SIZE: 20, // Increased batch size for better event handling capacity
+  // Concurrency settings - optimized for 10,000+ events with maximum throughput
+  CONCURRENT_LIMIT: Math.max(50, Math.floor(cpus().length * 6)), // Significantly increased for 10k+ events
+  BATCH_SIZE: 100, // Much larger batch size for high-volume processing
   
   // Retry settings - optimized for resilience
   MAX_RETRIES: 8, // Increased from 5 for better persistence
