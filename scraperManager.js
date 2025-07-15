@@ -2120,9 +2120,37 @@ export class ScraperManager {
   async startConcurrentProcessing() {
     let consecutiveFailures = 0;
     let lastSuccessfulBatch = Date.now();
+    let circuitBreakerOpen = false;
+    let circuitBreakerOpenTime = 0;
+    const CIRCUIT_BREAKER_THRESHOLD = 8; // Open circuit after 8 consecutive failures
+    const CIRCUIT_BREAKER_TIMEOUT = 30000; // 30 seconds before trying again
 
     while (this.isRunning) {
       try {
+        // Circuit breaker logic - prevent cascading failures
+        if (circuitBreakerOpen) {
+          if (Date.now() - circuitBreakerOpenTime > CIRCUIT_BREAKER_TIMEOUT) {
+            circuitBreakerOpen = false;
+            consecutiveFailures = 0;
+            this.logWithTime("Circuit breaker reset - resuming normal processing", "success");
+          } else {
+            // Wait briefly and continue to next iteration
+            await setTimeout(2000);
+            continue;
+          }
+        }
+
+        // Check if we should open circuit breaker
+        if (consecutiveFailures >= CIRCUIT_BREAKER_THRESHOLD && !circuitBreakerOpen) {
+          circuitBreakerOpen = true;
+          circuitBreakerOpenTime = Date.now();
+          this.logWithTime(
+            `Circuit breaker opened due to ${consecutiveFailures} consecutive failures - pausing for ${CIRCUIT_BREAKER_TIMEOUT/1000}s`,
+            "warning"
+          );
+          continue;
+        }
+
         // Get events that need processing
         const eventsToProcess = await this.getEvents();
 
@@ -2147,11 +2175,12 @@ export class ScraperManager {
 
             if (parallelResult) {
               // Update tracking based on parallel processing results
-              if (parallelResult.successRate > 0.7) {
+              if (parallelResult.successRate > 0.6) {
                 consecutiveFailures = 0;
                 lastSuccessfulBatch = Date.now();
               } else {
-                consecutiveFailures++;
+                // Don't increment failures as aggressively for parallel processing
+                consecutiveFailures = Math.min(consecutiveFailures + 1, 2);
               }
 
               // Process remaining events if any
@@ -2165,10 +2194,10 @@ export class ScraperManager {
                 );
               }
 
-              // Shorter delay after parallel processing
+              // Failure-resistant delay after parallel processing
               const parallelDelay =
-                parallelResult.successRate > 0.8 ? 300 : 800;
-              await setTimeout(parallelDelay + Math.random() * 200);
+                parallelResult.successRate > 0.5 ? 200 : 400;
+              await setTimeout(parallelDelay + Math.random() * 100);
               continue; // Skip regular batch processing
             }
           }
@@ -2177,18 +2206,17 @@ export class ScraperManager {
           const optimalBatchSize = 5; // Increased optimal batch size for better throughput
           let batchSize = Math.min(optimalBatchSize, eventsToProcess.length);
 
-          // Adaptive batch sizing based on recent success rate
-          if (consecutiveFailures > 2) {
-            // Instead of reducing to 1, maintain a minimum batch size (e.g., 2 or 3) or implement a more sophisticated backoff.
-            // For now, let's ensure it's at least 2.
-            batchSize = Math.max(2, optimalBatchSize);
+          // Failure-resistant batch sizing - maintain throughput during failures
+          if (consecutiveFailures > 3) {
+            // Only slightly reduce batch size, maintain minimum of 3 for efficiency
+            batchSize = Math.max(3, Math.floor(optimalBatchSize * 0.8));
             this.logWithTime(
-              `Maintaining minimum batch size of ${batchSize} due to recent failures`,
+              `Slightly reducing batch size to ${batchSize} due to failures (maintaining throughput)`,
               "warning"
             );
           } else if (consecutiveFailures === 0 && eventsToProcess.length >= 6) {
-            // Increase to 6 events if we're doing well and have many events
-            batchSize = Math.min(6, eventsToProcess.length);
+            // Increase to 8 events if we're doing well and have many events
+            batchSize = Math.min(8, eventsToProcess.length);
             this.logWithTime(
               `Increasing batch size to ${batchSize} for better throughput`,
               "info"
@@ -2288,34 +2316,34 @@ export class ScraperManager {
             consecutiveFailures++;
           }
 
-          // Optimized adaptive delay for fast 3-event batch processing
+          // Failure-resistant adaptive delay - maintain speed during failures
           let nextBatchDelay = config.PROCESSING_INTERVAL;
 
-          if (batchSuccessRate < 0.3) {
-            // Poor success rate - moderate slowdown for 3-event batches
-            nextBatchDelay = config.PROCESSING_INTERVAL * 2;
+          if (batchSuccessRate < 0.2) {
+            // Very poor success rate - minimal slowdown to maintain throughput
+            nextBatchDelay = config.PROCESSING_INTERVAL * 1.3;
             this.logWithTime(
-              `Poor success rate (${Math.round(
+              `Very poor success rate (${Math.round(
                 batchSuccessRate * 100
-              )}%), slowing down moderately`,
+              )}%), minimal slowdown to maintain throughput`,
               "warning"
             );
-          } else if (batchSuccessRate < 0.6) {
-            // Moderate success rate - slight slowdown
-            nextBatchDelay = config.PROCESSING_INTERVAL * 1.5;
-          } else if (batchSuccessRate >= 0.8 && batchSize <= 3) {
-            // Excellent success rate with small batches - speed up
-            nextBatchDelay = Math.max(200, config.PROCESSING_INTERVAL * 0.5);
+          } else if (batchSuccessRate < 0.5) {
+            // Moderate success rate - slight adjustment only
+            nextBatchDelay = config.PROCESSING_INTERVAL * 1.1;
+          } else if (batchSuccessRate >= 0.7) {
+            // Good success rate - speed up processing
+            nextBatchDelay = Math.max(150, config.PROCESSING_INTERVAL * 0.6);
             this.logWithTime(
-              `Excellent success rate (${Math.round(
+              `Good success rate (${Math.round(
                 batchSuccessRate * 100
               )}%), speeding up batch processing`,
               "success"
             );
           }
 
-          // Reduced jitter for faster processing
-          nextBatchDelay += Math.random() * 300;
+          // Minimal jitter for consistent high throughput
+          nextBatchDelay += Math.random() * 150;
 
           await setTimeout(nextBatchDelay);
         } else {

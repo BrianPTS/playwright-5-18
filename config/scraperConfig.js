@@ -11,7 +11,7 @@ export default {
   
   // Concurrency settings - optimized for 10,000+ events with maximum throughput
   CONCURRENT_LIMIT: Math.max(50, Math.floor(cpus().length * 6)), // Significantly increased for 10k+ events
-  BATCH_SIZE: 100, // Much larger batch size for high-volume processing
+  BATCH_SIZE: 30, // Much larger batch size for high-volume processing
   
   // Retry settings - optimized for resilience
   MAX_RETRIES: 8, // Increased from 5 for better persistence
