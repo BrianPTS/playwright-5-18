@@ -958,6 +958,12 @@ export class ScraperManager {
         throw new Error(`Event ${eventId} is missing required mapping_id`);
       }
 
+      // Initialize variables for database operations tracking
+      let rowsToDelete = [];
+      let rowsToInsert = [];
+      let rowsToUpdate = [];
+      let unchangedRows = 0;
+
       // Filter valid groups
       const validScrapeResult = scrapeResult.filter(
         (group) =>
@@ -1065,10 +1071,10 @@ export class ScraperManager {
         });
 
         // Identify rows to delete, update, and insert
-        const rowsToDelete = [];
-        const rowsToInsert = [];
-        const rowsToUpdate = [];
-        let unchangedRows = 0;
+        rowsToDelete = [];
+        rowsToInsert = [];
+        rowsToUpdate = [];
+        unchangedRows = 0;
 
         // Identify rows to delete or update
         for (const [rowKey, existingData] of existingRowMap) {
