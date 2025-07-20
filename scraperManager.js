@@ -931,14 +931,17 @@ export class ScraperManager {
 
   async updateEventMetadata(eventId, scrapeResult) {
     const startTime = performance.now();
+    const session = await Event.startSession();
 
     try {
-      // Get event data upfront
-      const event = await Event.findOne({ Event_ID: eventId })
-        .select(
-          "priceIncreasePercentage inHandDate mapping_id Available_Seats metadata Event_Name Venue Event_DateTime"
-        ) // Added Event_Name, Venue, Event_DateTime
-        .lean();
+      return await session.withTransaction(async () => {
+        // Get event data upfront - always fresh, no caching
+        const event = await Event.findOne({ Event_ID: eventId })
+          .select(
+            "priceIncreasePercentage inHandDate mapping_id Available_Seats metadata Event_Name Venue Event_DateTime"
+          ) // Added Event_Name, Venue, Event_DateTime
+          .session(session)
+          .read('primary'); // Force read from primary for fresh data
 
       if (!event) {
         throw new Error(`Event ${eventId} not found in database`);
@@ -966,18 +969,18 @@ export class ScraperManager {
 
       const currentTicketCount = validScrapeResult.length;
 
-      // Quick update of basic info
-      await Event.updateOne(
-        { Event_ID: eventId },
-        {
-          $set: {
-            Available_Seats: currentTicketCount,
-            Last_Updated: new Date(), // Ensure Last_Updated is always set to now
-            "metadata.lastUpdate": new Date(),
-            "metadata.ticketCount": currentTicketCount,
-          },
-        }
-      );
+        // Quick update of basic info
+        await Event.updateOne(
+          { Event_ID: eventId },
+          {
+            $set: {
+              Available_Seats: currentTicketCount,
+              Last_Updated: new Date(), // Ensure Last_Updated is always set to now
+              "metadata.lastUpdate": new Date(),
+              "metadata.ticketCount": currentTicketCount,
+            },
+          }
+        ).session(session);
 
       const LOG_LEVEL =
         global.config && typeof global.config.LOG_LEVEL !== "undefined"
@@ -985,20 +988,20 @@ export class ScraperManager {
           : process.env.LOG_LEVEL || 2;
 
       if (validScrapeResult?.length > 0) {
-        // Fetch existing groups for efficient row-level comparison
-        const existingGroups = await ConsecutiveGroup.find(
-          { eventId },
-          {
-            _id: 1,
-            section: 1,
-            row: 1,
-            seats: 1,
-            seatCount: 1,
-            "inventory.listPrice": 1,
-            "inventory.quantity": 1,
-            "inventory.inventoryId": 1,
-          }
-        ).lean();
+          // Fetch existing groups for efficient row-level comparison - always fresh data
+          const existingGroups = await ConsecutiveGroup.find(
+            { eventId },
+            {
+              _id: 1,
+              section: 1,
+              row: 1,
+              seats: 1,
+              seatCount: 1,
+              "inventory.listPrice": 1,
+              "inventory.quantity": 1,
+              "inventory.inventoryId": 1,
+            }
+          ).session(session).read('primary'); // Force read from primary for fresh data
 
         // Create maps for efficient lookups
         const existingRowMap = new Map();
@@ -1127,17 +1130,27 @@ export class ScraperManager {
           }
         }
 
+        // Log database operation summary at level 3
+        if (LOG_LEVEL >= 3) {
+          this.logWithTime(
+            `[Debug SM ${eventId}] Database operation summary: ${rowsToDelete.length} to delete, ${rowsToUpdate.length} to update, ${rowsToInsert.length} to insert, ${unchangedRows} unchanged`,
+            "debug"
+          );
+        }
+        // Console log for immediate visibility
+        console.log(`[DB OPERATIONS ${eventId}] Summary: ${rowsToDelete.length} DELETE, ${rowsToUpdate.length} UPDATE, ${rowsToInsert.length} INSERT, ${unchangedRows} UNCHANGED`);
+
         // Perform efficient updates only if there are changes
         if (
           rowsToDelete.length > 0 ||
           rowsToInsert.length > 0 ||
           rowsToUpdate.length > 0
         ) {
-          // Delete removed rows
-          if (rowsToDelete.length > 0) {
-            await ConsecutiveGroup.deleteMany({
-              _id: { $in: rowsToDelete },
-            });
+            // Delete removed rows
+            if (rowsToDelete.length > 0) {
+              await ConsecutiveGroup.deleteMany({
+                _id: { $in: rowsToDelete },
+              }).session(session);
 
             if (LOG_LEVEL >= 2) {
               this.logWithTime(
@@ -1145,6 +1158,13 @@ export class ScraperManager {
                 "info"
               );
             }
+            if (LOG_LEVEL >= 3) {
+              this.logWithTime(
+                `[Debug SM ${eventId}] DELETE operation completed: ${rowsToDelete.length} rows removed from database`,
+                "debug"
+              );
+            }
+            console.log(`[DB DELETE ${eventId}] Removed ${rowsToDelete.length} rows from database`);
           }
 
           // Update changed rows
@@ -1259,7 +1279,8 @@ export class ScraperManager {
 
             try {
               const result = await ConsecutiveGroup.bulkWrite(bulkOperations, {
-                ordered: false,
+                ordered: true,
+                session: session,
               });
               if (LOG_LEVEL >= 2) {
                 this.logWithTime(
@@ -1267,11 +1288,24 @@ export class ScraperManager {
                   "info"
                 );
               }
+              if (LOG_LEVEL >= 3) {
+                this.logWithTime(
+                  `[Debug SM ${eventId}] UPDATE operation completed: ${result.modifiedCount} rows modified in database (${result.matchedCount} matched)`,
+                  "debug"
+                );
+              }
+              console.log(`[DB UPDATE ${eventId}] Modified ${result.modifiedCount} rows in database (${result.matchedCount} matched)`);
             } catch (error) {
               console.error(
                 `[ERROR] Event ${eventId} - Failed to bulk update ConsecutiveGroup:`,
                 error.message
               );
+              if (LOG_LEVEL >= 3) {
+                this.logWithTime(
+                  `[Debug SM ${eventId}] UPDATE operation failed: ${error.message}`,
+                  "debug"
+                );
+              }
             }
           }
 
@@ -1393,7 +1427,7 @@ export class ScraperManager {
                   `[DEBUG] Event ${eventId} - First document inHandDate:`,
                   batch[0]?.inHandDate
                 );
-                await ConsecutiveGroup.insertMany(batch, { ordered: false });
+                await ConsecutiveGroup.insertMany(batch, { ordered: true, session: session });
                 console.log(
                   `[DEBUG] Event ${eventId} - Successfully inserted batch`
                 );
@@ -1412,20 +1446,27 @@ export class ScraperManager {
                 "info"
               );
             }
+            if (LOG_LEVEL >= 3) {
+              this.logWithTime(
+                `[Debug SM ${eventId}] INSERT operation completed: ${groupsToInsert.length} new rows added to database`,
+                "debug"
+              );
+            }
+            console.log(`[DB INSERT ${eventId}] Added ${groupsToInsert.length} new rows to database`);
           }
         } else {
           if (LOG_LEVEL >= 3) {
             this.logWithTime(
-              `[Debug SM ${eventId}] No row-level changes detected. Skipping database updates.`,
+              `[Debug SM ${eventId}] NO CHANGES: No database operations needed - ${unchangedRows} rows remain unchanged, 0 deletes, 0 updates, 0 inserts`,
               "debug"
             );
           }
         }
       } else if (validScrapeResult?.length === 0) {
-        // Handle case where scrape result is empty: delete all existing groups for this eventId
-        const existingGroupCount = await ConsecutiveGroup.countDocuments({
-          eventId,
-        });
+          // Handle case where scrape result is empty: delete all existing groups for this eventId
+          const existingGroupCount = await ConsecutiveGroup.countDocuments({
+            eventId,
+          }).session(session).read('primary'); // Force read from primary for fresh data
         if (existingGroupCount > 0) {
           if (LOG_LEVEL >= 2) {
             this.logWithTime(
@@ -1433,11 +1474,24 @@ export class ScraperManager {
               "info"
             );
           }
-          await ConsecutiveGroup.deleteMany({ eventId });
+          if (LOG_LEVEL >= 3) {
+            this.logWithTime(
+              `[Debug SM ${eventId}] EMPTY SCRAPE RESULT: Performing bulk delete of all ${existingGroupCount} existing rows`,
+              "debug"
+            );
+          }
+            await ConsecutiveGroup.deleteMany({ eventId }).session(session);
+          if (LOG_LEVEL >= 3) {
+            this.logWithTime(
+              `[Debug SM ${eventId}] BULK DELETE operation completed: ${existingGroupCount} rows removed due to empty scrape result`,
+              "debug"
+            );
+          }
+          console.log(`[DB BULK DELETE ${eventId}] Removed ${existingGroupCount} existing groups due to empty scrape result`);
         } else {
           if (LOG_LEVEL >= 3) {
             this.logWithTime(
-              `[Debug SM ${eventId}] No valid groups in scrape result and no existing groups to delete.`,
+              `[Debug SM ${eventId}] EMPTY SCRAPE RESULT: No existing groups to delete - database already clean`,
               "debug"
             );
           }
@@ -1456,17 +1510,29 @@ export class ScraperManager {
       // Also update the last processed time to prevent immediate reprocessing
       this.eventLastProcessedTime.set(eventId, Date.now());
 
-      if (LOG_LEVEL >= 3) {
-        this.logWithTime(
-          `Updated event ${eventId} in ${(
-            performance.now() - startTime
-          ).toFixed(2)}ms`,
-          "debug"
-        );
-      }
+        if (LOG_LEVEL >= 3) {
+          // Provide a final summary of all database operations performed
+          const totalOperations = (rowsToDelete?.length || 0) + (rowsToUpdate?.length || 0) + (rowsToInsert?.length || 0);
+          const operationSummary = totalOperations > 0 
+            ? `${totalOperations} total database operations performed` 
+            : 'no database changes needed';
+          
+          this.logWithTime(
+            `[Debug SM ${eventId}] Event processing completed in ${(
+              performance.now() - startTime
+            ).toFixed(2)}ms - ${operationSummary}`,
+            "debug"
+          );
+        }
+        // Console log for event completion summary
+        const totalOps = (rowsToDelete?.length || 0) + (rowsToUpdate?.length || 0) + (rowsToInsert?.length || 0);
+        console.log(`[EVENT COMPLETE ${eventId}] Processed in ${(performance.now() - startTime).toFixed(2)}ms - ${totalOps > 0 ? `${totalOps} DB operations` : 'No DB changes'}`);
+      });
     } catch (error) {
       await this.logError(eventId, "DATABASE_ERROR", error);
       throw error;
+    } finally {
+      await session.endSession();
     }
   }
 
