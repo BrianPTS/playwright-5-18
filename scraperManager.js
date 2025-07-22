@@ -13,6 +13,7 @@ import SessionManager from './helpers/SessionManager.js';
 import pThrottle from 'p-throttle';
 import config from './config/scraperConfig.js';
 import _ from 'lodash';
+import InventoryApi from './utils/inventoryApi.js';
 // CSV upload functionality removed
 let inventoryIdCounter = 0;
 
@@ -170,6 +171,9 @@ export class ScraperManager {
       interval: 100, // Minimal interval for maximum throughput
       strict: false, // Allow bursts for better throughput
     })(ScrapeEvent);
+
+    // Initialize inventory API for external deletions
+    this.inventoryApi = new InventoryApi();
   }
 
   logWithTime(message, type = "info") {
@@ -1154,9 +1158,41 @@ export class ScraperManager {
         ) {
             // Delete removed rows
             if (rowsToDelete.length > 0) {
+              // First, get inventory IDs for external API deletion
+              const groupsToDelete = await ConsecutiveGroup.find({
+                _id: { $in: rowsToDelete }
+              }, { 'inventory.inventoryId': 1 }).session(session);
+              
+              const inventoryIdsToDelete = groupsToDelete
+                .map(group => group.inventory?.inventoryId)
+                .filter(id => id); // Filter out null/undefined IDs
+
+              // Delete from database first
               await ConsecutiveGroup.deleteMany({
                 _id: { $in: rowsToDelete },
               }).session(session);
+
+              // Then delete from external API if we have inventory IDs
+              if (inventoryIdsToDelete.length > 0) {
+                try {
+                  const apiDeleteResult = await this.inventoryApi.deleteInventoryBatch(inventoryIdsToDelete);
+                  if (LOG_LEVEL >= 3) {
+                    this.logWithTime(
+                      `[Debug SM ${eventId}] External API deletion: ${apiDeleteResult.successful.length} successful, ${apiDeleteResult.failed.length} failed`,
+                      "debug"
+                    );
+                  }
+                  console.log(`[API DELETE ${eventId}] External API: ${apiDeleteResult.successful.length} successful, ${apiDeleteResult.failed.length} failed`);
+                } catch (apiError) {
+                  console.error(`[API DELETE ERROR ${eventId}] Failed to delete inventories via API:`, apiError.message);
+                  if (LOG_LEVEL >= 1) {
+                    this.logWithTime(
+                      `[Warning SM ${eventId}] External API deletion failed: ${apiError.message}`,
+                      "warning"
+                    );
+                  }
+                }
+              }
 
             if (LOG_LEVEL >= 2) {
               this.logWithTime(
@@ -1486,7 +1522,42 @@ export class ScraperManager {
               "debug"
             );
           }
-            await ConsecutiveGroup.deleteMany({ eventId }).session(session);
+          
+          // First, get inventory IDs for external API deletion
+          const allGroupsToDelete = await ConsecutiveGroup.find(
+            { eventId },
+            { 'inventory.inventoryId': 1 }
+          ).session(session);
+          
+          const allInventoryIdsToDelete = allGroupsToDelete
+            .map(group => group.inventory?.inventoryId)
+            .filter(id => id); // Filter out null/undefined IDs
+
+          // Delete from database first
+          await ConsecutiveGroup.deleteMany({ eventId }).session(session);
+          
+          // Then delete from external API if we have inventory IDs
+          if (allInventoryIdsToDelete.length > 0) {
+            try {
+              const apiBulkDeleteResult = await this.inventoryApi.deleteInventoryBatch(allInventoryIdsToDelete);
+              if (LOG_LEVEL >= 3) {
+                this.logWithTime(
+                  `[Debug SM ${eventId}] External API bulk deletion: ${apiBulkDeleteResult.successful.length} successful, ${apiBulkDeleteResult.failed.length} failed`,
+                  "debug"
+                );
+              }
+              console.log(`[API BULK DELETE ${eventId}] External API: ${apiBulkDeleteResult.successful.length} successful, ${apiBulkDeleteResult.failed.length} failed`);
+            } catch (apiBulkError) {
+              console.error(`[API BULK DELETE ERROR ${eventId}] Failed to delete inventories via API:`, apiBulkError.message);
+              if (LOG_LEVEL >= 1) {
+                this.logWithTime(
+                  `[Warning SM ${eventId}] External API bulk deletion failed: ${apiBulkError.message}`,
+                  "warning"
+                );
+              }
+            }
+          }
+          
           if (LOG_LEVEL >= 3) {
             this.logWithTime(
               `[Debug SM ${eventId}] BULK DELETE operation completed: ${existingGroupCount} rows removed due to empty scrape result`,
