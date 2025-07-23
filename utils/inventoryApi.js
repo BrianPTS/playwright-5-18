@@ -1,4 +1,8 @@
 import axios from 'axios';
+import dotenv from "dotenv";
+
+// Load environment variables
+dotenv.config();
 
 /**
  * Utility class for SeatScouts inventory API operations
@@ -15,35 +19,11 @@ class InventoryApi {
   }
 
   /**
-   * Delete inventory item by inventory ID
+   * Delete inventory item by inventory ID (uses batch method)
    * @param {string} inventoryId - The inventory ID to delete
    * @returns {Promise<Object>} API response
    */
-  async deleteInventory(inventoryId) {
-    try {
-      const response = await axios.post(`${this.baseURL}/inventories/delete`, {
-        inventory_ids: [inventoryId]
-      }, {
-        headers: this.headers,
-        timeout: 10000 // 10 second timeout
-      });
 
-      return {
-        success: true,
-        data: response.data,
-        status: response.status
-      };
-    } catch (error) {
-      console.error(`Failed to delete inventory ${inventoryId}:`, error.message);
-      
-      return {
-        success: false,
-        error: error.message,
-        status: error.response?.status || 'NETWORK_ERROR',
-        inventoryId: inventoryId
-      };
-    }
-  }
 
   /**
    * Delete multiple inventory items in batch
@@ -52,12 +32,26 @@ class InventoryApi {
    */
   async deleteInventoryBatch(inventoryIds) {
     try {
+      // Debug logging for API request
+      console.log(`[API DEBUG] Attempting to delete inventory batch:`, {
+        url: `${this.baseURL}/inventories/delete`,
+        inventoryIds: inventoryIds,
+        count: inventoryIds.length,
+        headers: {
+          'X-Company-Id': this.headers['X-Company-Id'],
+          'X-Api-Token': this.headers['X-Api-Token'],
+          'Content-Type': this.headers['Content-Type']
+        }
+      });
+
       const response = await axios.post(`${this.baseURL}/inventories/delete`, {
         inventory_ids: inventoryIds
       }, {
         headers: this.headers,
         timeout: 15000 // 15 second timeout for batch operations
       });
+
+      console.log(`[API DEBUG] Batch deletion successful:`, response.status, response.data);
 
       return {
         successful: inventoryIds, // Assume all successful if no error
@@ -67,35 +61,23 @@ class InventoryApi {
       };
     } catch (error) {
       console.error(`Failed to delete inventory batch:`, error.message);
+      if (error.response) {
+        console.error(`[API DEBUG] Response status:`, error.response.status);
+        console.error(`[API DEBUG] Response data:`, error.response.data);
+        console.error(`[API DEBUG] Response headers:`, error.response.headers);
+      }
       
-      // If batch fails, fall back to individual deletions
-      const results = {
+      // Return failed result for all inventory IDs since batch deletion failed
+      // No fallback to individual deletions as there's no separate single deletion API
+      return {
         successful: [],
-        failed: [],
+        failed: inventoryIds.map(id => ({
+          id: id,
+          error: error.message,
+          status: error.response?.status || 'NETWORK_ERROR'
+        })),
         total: inventoryIds.length
       };
-
-      // Process deletions individually as fallback
-      for (const inventoryId of inventoryIds) {
-        const result = await this.deleteInventory(inventoryId);
-        
-        if (result.success) {
-          results.successful.push(inventoryId);
-        } else {
-          results.failed.push({
-            id: inventoryId,
-            error: result.error,
-            status: result.status
-          });
-        }
-
-        // Small delay between requests to be respectful to the API
-        if (inventoryIds.length > 1) {
-          await new Promise(resolve => setTimeout(resolve, 100));
-        }
-      }
-
-      return results;
     }
   }
 }
