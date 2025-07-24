@@ -1121,9 +1121,11 @@ export class ScraperManager {
             newData.groupData.inventory.inventoryId = existingData.inventoryId;
 
             // Now, decide if the DB record needs an update for any of these fields
-            if (seatsChanged || priceChanged || quantityChanged) {
-              rowsToUpdate.push({ _id: existingData._id, data: newData });
-            } else {
+             // Force delete-and-insert for all changes to ensure fresh inventory IDs
+             if (seatsChanged || priceChanged || quantityChanged) {
+               rowsToDelete.push(existingData._id);
+               rowsToInsert.push({ rowKey, data: newData });
+             } else {
               // This 'else' implies:
               // 1. !seatsChanged && !priceChanged (so inventoryId was preserved)
               // 2. AND !quantityChanged (so no other tracked change)
