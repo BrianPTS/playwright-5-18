@@ -2,8 +2,7 @@ import moment from "moment";
 import { setTimeout } from "timers/promises";
 import { Event, ErrorLog, ConsecutiveGroup } from "./models/index.js";
 import { ScrapeEvent, refreshHeaders, generateEnhancedHeaders } from "./scraper.js";
-import { cpus } from "os";
-import fs from "fs/promises";
+import * as fs from "fs";
 import path from "path";
 import ProxyManager from "./helpers/ProxyManager.js";
 import { v4 as uuidv4 } from 'uuid';
@@ -936,7 +935,9 @@ export class ScraperManager {
   async updateEventMetadata(eventId, scrapeResult) {
     const startTime = performance.now();
     const session = await Event.startSession();
-
+// save json here as well for scrapeResults 
+const scrapeResultJson = JSON.stringify(scrapeResult);
+fs.writeFileSync('debug/scrapeResult.json', scrapeResultJson);
     try {
       return await session.withTransaction(async () => {
         // Get event data upfront - always fresh, no caching
@@ -976,7 +977,9 @@ export class ScraperManager {
           group.inventory &&
           group.inventory.quantity > 1
       );
+      const result = JSON.stringify(validScrapeResult);
 
+      fs.writeFileSync("debug/validScrapeResult.json", result);
       const currentTicketCount = validScrapeResult.length;
 
         // Quick update of basic info
@@ -1016,7 +1019,6 @@ export class ScraperManager {
         // Create maps for efficient lookups
         const existingRowMap = new Map();
         existingGroups.forEach((group) => {
-          const rowKey = `${group.section}-${group.row}`;
           // Extract seat numbers and ensure they're all strings for consistent comparison
           const extractedSeats = group.seats
             .map((s) => {
@@ -1032,6 +1034,10 @@ export class ScraperManager {
             })
             .sort(); // Sort lexicographically as strings
 
+          // Create unique rowKey that includes seat range to avoid conflicts
+          const seatRange = extractedSeats.length > 0 ? `${extractedSeats[0]}-${extractedSeats[extractedSeats.length - 1]}` : 'no-seats';
+          const rowKey = `${group.section}-${group.row}-${seatRange}`;
+
           existingRowMap.set(rowKey, {
             _id: group._id,
             seatCount: group.seatCount,
@@ -1044,12 +1050,6 @@ export class ScraperManager {
 
         const newRowMap = new Map();
         validScrapeResult.forEach((group) => {
-          const rowKey = `${group.section}-${group.row}`;
-          const basePrice = parseFloat(group.inventory.listPrice);
-          const increasedPrice = basePrice < 35 
-            ? basePrice + 10 
-            : basePrice * (1 + priceIncreasePercentage / 100);
-
           // Extract seat numbers and ensure they're all strings for consistent comparison
           const extractedSeats = group.seats
             .map((s) => {
@@ -1065,6 +1065,15 @@ export class ScraperManager {
             })
             .sort(); // Sort lexicographically as strings
 
+          // Create unique rowKey that includes seat range to avoid conflicts
+          const seatRange = extractedSeats.length > 0 ? `${extractedSeats[0]}-${extractedSeats[extractedSeats.length - 1]}` : 'no-seats';
+          const rowKey = `${group.section}-${group.row}-${seatRange}`;
+          
+          const basePrice = parseFloat(group.inventory.listPrice);
+          const increasedPrice = basePrice < 35 
+            ? basePrice + 10 
+            : basePrice * (1 + priceIncreasePercentage / 100);
+
           newRowMap.set(rowKey, {
             seatCount: group.inventory.quantity,
             seats: extractedSeats, // Use the normalized and sorted array
@@ -1074,11 +1083,7 @@ export class ScraperManager {
           });
         });
 
-        // Identify rows to delete, update, and insert
-        rowsToDelete = [];
-        rowsToInsert = [];
-        rowsToUpdate = [];
-        unchangedRows = 0;
+     
 
         // Identify rows to delete or update
         for (const [rowKey, existingData] of existingRowMap) {
@@ -1158,6 +1163,9 @@ export class ScraperManager {
           rowsToInsert.length > 0 ||
           rowsToUpdate.length > 0
         ) {
+          const result = JSON.stringify(rowsToInsert);
+
+          fs.writeFileSync("debug/rowsToInsert.json", result);
             // Delete removed rows
             if (rowsToDelete.length > 0) {
               // First, get inventory IDs for external API deletion
@@ -1489,9 +1497,9 @@ export class ScraperManager {
                 },
               };
             });
-
+            
             // Insert in batches for performance
-            const BATCH_SIZE = 100;
+            const BATCH_SIZE = 500;
             for (let i = 0; i < groupsToInsert.length; i += BATCH_SIZE) {
               const batch = groupsToInsert.slice(i, i + BATCH_SIZE);
               try {
@@ -1526,7 +1534,7 @@ export class ScraperManager {
                 // Continue with next batch even if this one fails
               }
             }
-
+ 
             if (LOG_LEVEL >= 2) {
               this.logWithTime(
                 `[Info SM ${eventId}] Inserted ${groupsToInsert.length} new/updated rows with new inventory IDs.`,
