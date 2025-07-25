@@ -968,13 +968,13 @@ export class ScraperManager {
       let rowsToUpdate = [];
       let unchangedRows = 0;
 
-      // Filter valid groups
+      // Filter valid groups - only check for basic structure, allow single seats
       const validScrapeResult = scrapeResult.filter(
         (group) =>
           group.seats &&
-          group.seats.length >= 2 &&
+          group.seats.length > 1 &&
           group.inventory &&
-          group.inventory.quantity >= 2
+          group.inventory.quantity > 1
       );
 
       const currentTicketCount = validScrapeResult.length;
@@ -1362,7 +1362,7 @@ export class ScraperManager {
             for (let i = 0; i < newInventoryItems.length; i += BATCH_SIZE) {
               const batch = newInventoryItems.slice(i, i + BATCH_SIZE);
               try {
-                await ConsecutiveGroup.insertMany(batch, { ordered: true, session: session });
+                await ConsecutiveGroup.insertMany(batch, { ordered: false, session: session });
               } catch (error) {
                 console.error(
                   `[ERROR] Event ${eventId} - Failed to insert updated ConsecutiveGroup batch:`,
@@ -1504,7 +1504,7 @@ export class ScraperManager {
                   `[DEBUG] Event ${eventId} - First document inHandDate:`,
                   batch[0]?.inHandDate
                 );
-                await ConsecutiveGroup.insertMany(batch, { ordered: true, session: session });
+                await ConsecutiveGroup.insertMany(batch, { ordered: false, session: session });
                 console.log(
                   `[DEBUG] Event ${eventId} - Successfully inserted batch`
                 );
@@ -1513,6 +1513,16 @@ export class ScraperManager {
                   `[ERROR] Event ${eventId} - Failed to insert ConsecutiveGroup batch:`,
                   error.message
                 );
+                // Log specific duplicate key errors for debugging
+                if (error.code === 11000 && error.writeErrors) {
+                  const duplicateErrors = error.writeErrors.filter(e => e.code === 11000);
+                  if (duplicateErrors.length > 0) {
+                    console.log(`[DEBUG] Event ${eventId} - ${duplicateErrors.length} duplicate key errors detected`);
+                    duplicateErrors.slice(0, 3).forEach((dupError, index) => {
+                      console.log(`[DEBUG] Event ${eventId} - Duplicate ${index + 1}: ${JSON.stringify(dupError.keyValue)}`);
+                    });
+                  }
+                }
                 // Continue with next batch even if this one fails
               }
             }

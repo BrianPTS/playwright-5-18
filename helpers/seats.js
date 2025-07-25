@@ -1,3 +1,4 @@
+import * as fs from 'fs';
 class Cluster {
     constructor(data) {
       this.data = data;
@@ -119,36 +120,38 @@ class Cluster {
   } 
   
    const GenerateNanoPlaces = (data) => {
+    fs.writeFileSync("debug/datatonanPalaces.json", JSON.stringify(data));
     let returnData = [];
-    
     data.map(x => {
-       if (x?.places && x?.places.length > 0) {
+      if (x?.places && x?.places.length > 0) {
         let _uData = getSeatsBatch(x?.places[0]);
         if (_uData) {
           _uData.map(y => {
-            returnData.push({
-              row: "",
-              section: "",
-              selection: x?.inventoryTypes.length > 0 ? x?.inventoryTypes[0] : "",
-              offerId: x?.offers.length > 0 ? x?.offers.length>1?x?.offers.reduce((shortest, current) => {
-                return current.length < shortest.length ? current : shortest;
-              }):x?.offers[0] : "",
-              listingId: "",
-              places: y,
-              seats: [],
-              lowSeat: 0,
-              highSeat: 0,
-              count: 0,
-              accessibility:x.accessibility.length>0 && x.accessibility.includes("wheelchair")?"wheelchair":x.accessibility.length>0?x.accessibility[0]:"",
-              descriptionId:x.description,
-              attributes:x.attributes
+            y.forEach(placeCode => {
+              returnData.push({
+                row: x.row || "",
+                section: x.section || "",
+                selection: x?.inventoryTypes.length > 0 ? x?.inventoryTypes[0] : "",
+                offerId: x?.offers.length > 0 ? x?.offers.length>1?x?.offers.reduce((shortest, current) => {
+                  return current.length < shortest.length ? current : shortest;
+                }):x?.offers[0] : "",
+                listingId: "",
+                places: [placeCode],
+                seats: [],
+                lowSeat: 0,
+                highSeat: 0,
+                count: 0,
+                accessibility:x.accessibility.length>0 && x.accessibility.includes("wheelchair")?"wheelchair":x.accessibility.length>0?x.accessibility[0]:"",
+                descriptionId:x.description,
+                attributes:x.attributes
+              })
             })
           })
         }
         else {
           returnData.push({
-            row: "",
-            section: "",
+            row: x.row || "",
+            section: x.section || "",
             selection: x?.inventoryTypes.length > 0 ? x?.inventoryTypes[0] : "",
             offerId: x?.offers.length > 0 ? x?.offers.length>1?x?.offers.reduce((shortest, current) => {
                 return current.length < shortest.length ? current : shortest;
@@ -162,19 +165,13 @@ class Cluster {
             accessibility:x.accessibility.length>0 && x.accessibility.includes("wheelchair")?"wheelchair":x.accessibility.length>0?x.accessibility[0]:"",
             descriptionId:x.description,
             attributes:x.attributes
-  
           })
-  
         }
-  
-        
-  
       }
-      else
-        return undefined;
-  
+      else return undefined;
     });
-     return returnData;
+    fs.writeFileSync("debug/nanoPalaces.json", JSON.stringify(returnData));
+    return returnData;
   }
 
 export default GenerateNanoPlaces

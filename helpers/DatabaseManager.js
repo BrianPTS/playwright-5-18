@@ -115,6 +115,11 @@ class DatabaseManager {
 
             const groupsToInsert = scrapeResult.map((group) => ({
               eventId,
+              inHandDate: event.inHandDate || new Date(),
+              mapping_id: event.mapping_id || eventId,
+              event_name: event.Event_Name,
+              venue_name: event.Venue,
+              event_date: event.Event_DateTime,
               section: group.section,
               row: group.row,
               seatCount: group.inventory.quantity,
@@ -123,11 +128,17 @@ class DatabaseManager {
               )}`,
               seats: group.seats.map((seatNumber) => ({
                 number: seatNumber.toString(),
-                inHandDate: event.inHandDate,
                 price: group.inventory.listPrice,
               })),
               inventory: {
                 ...group.inventory,
+                inventoryId: group.inventory.inventoryId || 0,
+                inHandDate: group.inventory.inHandDate || event.inHandDate || new Date(),
+                eventId: eventId,
+                mapping_id: event.mapping_id || eventId,
+                event_name: event.Event_Name,
+                venue_name: event.Venue,
+                event_date: event.Event_DateTime,
                 tickets: group.inventory.tickets.map((ticket) => ({
                   ...ticket,
                   sellPrice: typeof ticket.sellPrice === 'number' && !isNaN(ticket.sellPrice) 
@@ -143,7 +154,22 @@ class DatabaseManager {
             }
             for (let i = 0; i < groupsToInsert.length; i += CHUNK_SIZE) { // Using CHUNK_SIZE defined at the top
               const chunk = groupsToInsert.slice(i, i + CHUNK_SIZE);
-              await ConsecutiveGroup.insertMany(chunk, { session });
+              try {
+                await ConsecutiveGroup.insertMany(chunk, { session, ordered: false });
+              } catch (error) {
+                this.logger.logWithTime(`[ERROR] Event ${eventId} - Failed to insert ConsecutiveGroup chunk: ${error.message}`, "error");
+                // Log specific duplicate key errors for debugging
+                if (error.code === 11000 && error.writeErrors) {
+                  const duplicateErrors = error.writeErrors.filter(e => e.code === 11000);
+                  if (duplicateErrors.length > 0) {
+                    this.logger.logWithTime(`[DEBUG] Event ${eventId} - ${duplicateErrors.length} duplicate key errors detected`, "debug");
+                    duplicateErrors.slice(0, 3).forEach((dupError, index) => {
+                      this.logger.logWithTime(`[DEBUG] Event ${eventId} - Duplicate ${index + 1}: ${JSON.stringify(dupError.keyValue)}`, "debug");
+                    });
+                  }
+                }
+                // Continue with next chunk even if this one fails
+              }
             }
             if (LOG_LEVEL >= 2) { // Assuming 2 is info level
               this.logger.logWithTime(`[Info ${eventId}] Successfully updated ${groupsToInsert.length} consecutive groups.`, "info");
@@ -182,4 +208,4 @@ class DatabaseManager {
   }
 }
 
-export default DatabaseManager; 
+export default DatabaseManager;

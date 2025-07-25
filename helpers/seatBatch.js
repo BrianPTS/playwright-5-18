@@ -1,5 +1,5 @@
 import moment from "moment";
-
+import * as fs from 'fs';
 // Function to generate unique 10-digit inventory ID
 
 // Global Filters
@@ -100,23 +100,37 @@ function CreateConsicutiveSeats(data) {
   const mergedData = [];
 
   data.forEach((item) => {
-    const existingGroup = mergedData.find(
-      (group) =>
-        group.section === item.section &&
-        group.row === item.row &&
-        group.offerId === item.offerId &&
-        group.seats[group.seats.length - 1] + 1 === item.seats[0]
-    );
-
-    if (existingGroup) {
-      existingGroup.seats.push(...item.seats);
-    } else {
+    let merged = false;
+    
+    // Try to find an existing group that this item can be merged with
+    for (let group of mergedData) {
+      if (group.section === item.section &&
+          group.row === item.row &&
+          group.offerId === item.offerId) {
+        
+        // Check if seats are consecutive (either direction)
+        const groupLastSeat = Math.max(...group.seats);
+        const groupFirstSeat = Math.min(...group.seats);
+        const itemFirstSeat = Math.min(...item.seats);
+        const itemLastSeat = Math.max(...item.seats);
+        
+        // Check if they can be merged (consecutive) - fixed logic
+        if (groupLastSeat + 1 === itemFirstSeat || itemLastSeat + 1 === groupFirstSeat) {
+          group.seats.push(...item.seats);
+          group.seats.sort((a, b) => a - b); // Keep seats sorted
+          merged = true;
+          break;
+        }
+      }
+    }
+    
+    if (!merged) {
       mergedData.push({
         amount: item.amount,
         lineItemType: item.lineItemType,
         section: item.section,
         row: item.row,
-        seats: [...item.seats],
+        seats: [...item.seats].sort((a, b) => a - b), // Ensure seats are sorted
         offerId: item.offerId,
         accessibility: item?.accessibility,
         descriptionId: item?.descriptionId,
@@ -124,6 +138,38 @@ function CreateConsicutiveSeats(data) {
       });
     }
   });
+
+  // Second pass: try to merge any remaining consecutive groups
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (let i = 0; i < mergedData.length; i++) {
+      for (let j = i + 1; j < mergedData.length; j++) {
+        const group1 = mergedData[i];
+        const group2 = mergedData[j];
+        
+        if (group1.section === group2.section &&
+            group1.row === group2.row &&
+            group1.offerId === group2.offerId) {
+          
+          const group1LastSeat = Math.max(...group1.seats);
+          const group1FirstSeat = Math.min(...group1.seats);
+          const group2FirstSeat = Math.min(...group2.seats);
+          const group2LastSeat = Math.max(...group2.seats);
+          
+          // Check if they can be merged (consecutive)
+          if (group1LastSeat + 1 === group2FirstSeat || group2LastSeat + 1 === group1FirstSeat) {
+            group1.seats.push(...group2.seats);
+            group1.seats.sort((a, b) => a - b);
+            mergedData.splice(j, 1); // Remove the merged group
+            changed = true;
+            break;
+          }
+        }
+      }
+      if (changed) break;
+    }
+  }
 
   return mergedData;
 }
@@ -301,52 +347,60 @@ export const AttachRowSection = (
 ) => {
   let allAvailableSeats = GetMapSeats(mapData);
   let mapPlacesIndex = allAvailableSeats.map((x) => x.seatId);
+  fs.writeFileSync("debug/allAvailableSeats.json", JSON.stringify(allAvailableSeats));
   let returnData = [];
   //get all seats number by seat id
   let customData = data
     .map((x) => {
-      if (x.places.length > 0) {
-        let placeId = x.places[0];
-        if (placeId) {
-          let indexToFind = mapPlacesIndex.indexOf(placeId);
-
-          if (indexToFind != -1) {
-            let found = allAvailableSeats[indexToFind];
-            // let  found= allAvailableSeats.find(y=>y.seatId==placeId);
-            if (found) {
-              let allPlaces = x?.places
-                .map((z) => {
-                  let indexOfZ = mapPlacesIndex.indexOf(z);
-
-                  let foundSeatFromMap = allAvailableSeats[indexOfZ];
-                  if (foundSeatFromMap && indexOfZ != -1) {
-                    return { ...foundSeatFromMap, offerId: x.offerId };
-                  }
-                  foundSeatFromMap = undefined;
-
-                  //SORT BY (seat) NUMBER
-                })
-                .filter((y) => y != undefined);
-
-              return {
-                section: found.section,
-                row: "",
-                seats: allPlaces,
-                eventId: event?.eventMappingId,
-                offerId: x.offerId,
-                accessibility: x?.accessibility,
-                descriptionId: x?.descriptionId,
-                attributes: x?.attributes,
-              };
-            }
-            found = undefined;
-          }
-        }
+      if (!x.places || x.places.length === 0) {
+        console.warn('Empty places array for offer:', x.offerId);
+        return undefined;
       }
 
-      return undefined;
+      // Verify all places belong to the same section
+      const sectionMap = {};
+      const allPlaces = x.places
+        .map((placeId) => {
+          const index = mapPlacesIndex.indexOf(placeId);
+          if (index === -1) {
+            console.warn('Place ID not found in map:', placeId);
+            return null;
+          }
+          
+          const seatInfo = allAvailableSeats[index];
+          if (!seatInfo) return null;
+          
+          // Track sections for verification
+          sectionMap[seatInfo.section] = true;
+          
+          return { ...seatInfo, offerId: x.offerId };
+        })
+        .filter(Boolean);
+
+      // Skip if no valid seats found
+      if (allPlaces.length === 0) {
+        console.warn('No valid seats found for offer:', x.offerId);
+        return undefined;
+      }
+
+      // Verify all seats belong to same section
+      const sections = Object.keys(sectionMap);
+      if (sections.length > 1) {
+        console.warn('Mixed sections in seat group:', sections.join(', '));
+      }
+
+      return {
+        section: allPlaces[0].section,
+        row: "",
+        seats: allPlaces,
+        eventId: event?.eventMappingId,
+        offerId: x.offerId,
+        accessibility: x?.accessibility,
+        descriptionId: x?.descriptionId,
+        attributes: x?.attributes,
+      };
     })
-    .filter((x) => x != undefined);
+    .filter(Boolean);
 
   //it will check if pair has same row as some events are giving pair of different row
   let groupedSeats = [];
@@ -403,11 +457,11 @@ export const AttachRowSection = (
 
   //it will make consicutive seats ex [2],[4],[3] => [2,3,4]
   returnData = CreateConsicutiveSeats(returnData);
+  fs.writeFileSync("debug/consicutive.json", JSON.stringify(returnData));
 
   //attach offer
 
-  return (
-    returnData
+  const finalData = returnData
       .map((x) => {
         let offerGet = offers.find((e) => e.offerId == x.offerId);
 
@@ -534,9 +588,7 @@ export const AttachRowSection = (
             return undefined;
           } else if (offerGet.name == "Me + 3 4-Pack Offer") {
             return undefined;
-          } else if (offerGet?.protected == true) {
-            return undefined;
-          } else {
+          }  else {
             return CreateInventoryAndLine(x, offerGet, event, descriptions);
           }
         } else {
@@ -551,7 +603,7 @@ export const AttachRowSection = (
         // Check if the current dbId is the first occurrence in the array
         return index === self.findIndex((o) => o.dbId.toString() === dbId);
       })
-      .filter((x) => x.inventory.quantity > 1)
+      // .filter((x) => x.inventory.quantity > 1) // Commented out to prevent losing single seats
 
       //remove duplicate
       .filter((obj, index, self) => {
@@ -566,6 +618,13 @@ export const AttachRowSection = (
         });
 
         return !hasDuplicate || index === 0; // Keep the first object or objects without duplicates
-      })
-  );
+      });
+
+  fs.writeFileSync(`debug/seatBatch_${event.eventId}.json`, JSON.stringify(finalData, null, 2));
+  
+  // Debug: Final processed data after all filters
+  fs.writeFileSync(`debug/finalProcessed_${event.eventId}.json`, JSON.stringify(finalData, null, 2));
+  console.log(`Final processed data written to debug/finalProcessed_${event.eventId}.json - Total items: ${finalData.length}`);
+
+  return finalData;
 };
