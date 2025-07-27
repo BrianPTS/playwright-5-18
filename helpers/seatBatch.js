@@ -347,7 +347,7 @@ export const AttachRowSection = (
 ) => {
   let allAvailableSeats = GetMapSeats(mapData);
   let mapPlacesIndex = allAvailableSeats.map((x) => x.seatId);
-  fs.writeFileSync("debug/allAvailableSeats.json", JSON.stringify(allAvailableSeats));
+  // fs.writeFileSync("debug/allAvailableSeats.json", JSON.stringify(allAvailableSeats));
   let returnData = [];
   //get all seats number by seat id
   let customData = data
@@ -457,7 +457,7 @@ export const AttachRowSection = (
 
   //it will make consicutive seats ex [2],[4],[3] => [2,3,4]
   returnData = CreateConsicutiveSeats(returnData);
-  fs.writeFileSync("debug/consicutive.json", JSON.stringify(returnData));
+  // fs.writeFileSync("debug/consicutive.json", JSON.stringify(returnData));
 
   //attach offer
 
@@ -620,11 +620,11 @@ export const AttachRowSection = (
         return !hasDuplicate || index === 0; // Keep the first object or objects without duplicates
       });
 
-  fs.writeFileSync(`debug/seatBatch_${event.eventId}.json`, JSON.stringify(finalData, null, 2));
+  // fs.writeFileSync(`debug/seatBatch_${event.eventId}.json`, JSON.stringify(finalData, null, 2));
   
-  // Debug: Final processed data after all filters
-  fs.writeFileSync(`debug/finalProcessed_${event.eventId}.json`, JSON.stringify(finalData, null, 2));
-  console.log(`Final processed data written to debug/finalProcessed_${event.eventId}.json - Total items: ${finalData.length}`);
+  // // Debug: Final processed data after all filters
+  // fs.writeFileSync(`debug/finalProcessed_${event.eventId}.json`, JSON.stringify(finalData, null, 2));
+  // console.log(`Final processed data written to debug/finalProcessed_${event.eventId}.json - Total items: ${finalData.length}`);
 
   return finalData;
 };

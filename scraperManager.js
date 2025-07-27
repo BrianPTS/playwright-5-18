@@ -936,8 +936,8 @@ export class ScraperManager {
     const startTime = performance.now();
     const session = await Event.startSession();
 // save json here as well for scrapeResults 
-const scrapeResultJson = JSON.stringify(scrapeResult);
-fs.writeFileSync('debug/scrapeResult.json', scrapeResultJson);
+// const scrapeResultJson = JSON.stringify(scrapeResult);
+// fs.writeFileSync('debug/scrapeResult.json', scrapeResultJson);
     try {
       return await session.withTransaction(async () => {
         // Get event data upfront - always fresh, no caching
@@ -977,9 +977,9 @@ fs.writeFileSync('debug/scrapeResult.json', scrapeResultJson);
           group.inventory &&
           group.inventory.quantity > 1
       );
-      const result = JSON.stringify(validScrapeResult);
+      // const result = JSON.stringify(validScrapeResult);
 
-      fs.writeFileSync("debug/validScrapeResult.json", result);
+      // fs.writeFileSync("debug/validScrapeResult.json", result);
       const currentTicketCount = validScrapeResult.length;
 
         // Quick update of basic info
@@ -1163,9 +1163,9 @@ fs.writeFileSync('debug/scrapeResult.json', scrapeResultJson);
           rowsToInsert.length > 0 ||
           rowsToUpdate.length > 0
         ) {
-          const result = JSON.stringify(rowsToInsert);
+          // const result = JSON.stringify(rowsToInsert);
 
-          fs.writeFileSync("debug/rowsToInsert.json", result);
+          // fs.writeFileSync("debug/rowsToInsert.json", result);
             // Delete removed rows
             if (rowsToDelete.length > 0) {
               // First, get inventory IDs for external API deletion

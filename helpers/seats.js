@@ -120,7 +120,7 @@ class Cluster {
   } 
   
    const GenerateNanoPlaces = (data) => {
-    fs.writeFileSync("debug/datatonanPalaces.json", JSON.stringify(data));
+    // fs.writeFileSync("debug/datatonanPalaces.json", JSON.stringify(data));
     let returnData = [];
     data.map(x => {
       if (x?.places && x?.places.length > 0) {
@@ -170,7 +170,7 @@ class Cluster {
       }
       else return undefined;
     });
-    fs.writeFileSync("debug/nanoPalaces.json", JSON.stringify(returnData));
+    // fs.writeFileSync("debug/nanoPalaces.json", JSON.stringify(returnData));
     return returnData;
   }
 
