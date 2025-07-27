@@ -4,7 +4,7 @@ import { cpus } from "os";
 export default {
   // Time limits - optimized for better flow
   MAX_UPDATE_INTERVAL: 120000, // Strict 2-minute update requirement
-  SCRAPE_TIMEOUT: 45000, // Reduced timeout to prevent hanging (reduced from 45000)
+  SCRAPE_TIMEOUT: 60000, // Reduced timeout to prevent hanging (reduced from 45000)
   MIN_TIME_BETWEEN_EVENT_SCRAPES: 3000, // Reduced to 3 seconds for better scalability
   URGENT_THRESHOLD: 110000, // Events needing update within 10 seconds of deadline
   PROCESSING_INTERVAL: 500, // Faster processing interval (reduced to 500ms for better throughput)
