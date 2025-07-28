@@ -19,7 +19,10 @@ class DatabaseManager {
         .select(fields.join(" "))
         .lean();
     } catch (error) {
-      this.logger.logWithTime(`Error fetching event ${eventId}: ${error.message}`, "error");
+      this.logger.logWithTime(
+        `Error fetching event ${eventId}: ${error.message}`,
+        "error"
+      );
       return null;
     }
   }
@@ -28,8 +31,11 @@ class DatabaseManager {
    * Update event metadata and ticket info
    */
   async updateEventMetadata(eventId, scrapeResult, scheduler) {
-    const LOG_LEVEL = (config && typeof config.LOG_LEVEL !== 'undefined') ? config.LOG_LEVEL : (process.env.LOG_LEVEL || 2);
-    const CHUNK_SIZE = (config && config.CHUNK_SIZE) ? config.CHUNK_SIZE : 100;
+    const LOG_LEVEL =
+      config && typeof config.LOG_LEVEL !== "undefined"
+        ? config.LOG_LEVEL
+        : process.env.LOG_LEVEL || 2;
+    const CHUNK_SIZE = config && config.CHUNK_SIZE ? config.CHUNK_SIZE : 100;
     const startTime = performance.now();
     const session = await Event.startSession();
 
@@ -75,7 +81,9 @@ class DatabaseManager {
           const existingGroups = await ConsecutiveGroup.find(
             { eventId },
             { section: 1, row: 1, seats: 1, "inventory.listPrice": 1 }
-          ).lean().session(session);
+          )
+            .lean()
+            .session(session);
 
           const existingSeats = new Set(
             existingGroups.flatMap((g) =>
@@ -92,11 +100,32 @@ class DatabaseManager {
           );
 
           // ADD DIAGNOSTIC LOGGING
-          if (LOG_LEVEL >= 3) { // Assuming 3 is a debug level
-            this.logger.logWithTime(`[Debug ${eventId}] Existing Seats Count: ${existingSeats.size}`, "debug");
-            if (existingSeats.size > 0) this.logger.logWithTime(`[Debug ${eventId}] Sample Existing Seats: ${Array.from(existingSeats).slice(0, 3).join(', ')}`, "debug");
-            this.logger.logWithTime(`[Debug ${eventId}] New Seats Count: ${newSeats.size}`, "debug");
-            if (newSeats.size > 0) this.logger.logWithTime(`[Debug ${eventId}] Sample New Seats: ${Array.from(newSeats).slice(0, 3).join(', ')}`, "debug");
+          if (LOG_LEVEL >= 3) {
+            // Assuming 3 is a debug level
+            this.logger.logWithTime(
+              `[Debug ${eventId}] Existing Seats Count: ${existingSeats.size}`,
+              "debug"
+            );
+            if (existingSeats.size > 0)
+              this.logger.logWithTime(
+                `[Debug ${eventId}] Sample Existing Seats: ${Array.from(
+                  existingSeats
+                )
+                  .slice(0, 3)
+                  .join(", ")}`,
+                "debug"
+              );
+            this.logger.logWithTime(
+              `[Debug ${eventId}] New Seats Count: ${newSeats.size}`,
+              "debug"
+            );
+            if (newSeats.size > 0)
+              this.logger.logWithTime(
+                `[Debug ${eventId}] Sample New Seats: ${Array.from(newSeats)
+                  .slice(0, 3)
+                  .join(", ")}`,
+                "debug"
+              );
           }
 
           // ROBUST CHANGE DETECTION LOGIC
@@ -105,8 +134,12 @@ class DatabaseManager {
             [...existingSeats].some((s) => !newSeats.has(s)) ||
             [...newSeats].some((s) => !existingSeats.has(s));
 
-          if (LOG_LEVEL >= 3) { // Assuming 3 is a debug level
-            this.logger.logWithTime(`[Debug ${eventId}] Change Detected for ConsecutiveGroup: ${hasChanges}`, "debug");
+          if (LOG_LEVEL >= 3) {
+            // Assuming 3 is a debug level
+            this.logger.logWithTime(
+              `[Debug ${eventId}] Change Detected for ConsecutiveGroup: ${hasChanges}`,
+              "debug"
+            );
           }
 
           if (hasChanges) {
@@ -115,11 +148,6 @@ class DatabaseManager {
 
             const groupsToInsert = scrapeResult.map((group) => ({
               eventId,
-              inHandDate: event.inHandDate || new Date(),
-              mapping_id: event.mapping_id || eventId,
-              event_name: event.Event_Name,
-              venue_name: event.Venue,
-              event_date: event.Event_DateTime,
               section: group.section,
               row: group.row,
               seatCount: group.inventory.quantity,
@@ -128,55 +156,55 @@ class DatabaseManager {
               )}`,
               seats: group.seats.map((seatNumber) => ({
                 number: seatNumber.toString(),
+                inHandDate: event.inHandDate,
                 price: group.inventory.listPrice,
               })),
               inventory: {
                 ...group.inventory,
-                inventoryId: group.inventory.inventoryId || 0,
-                inHandDate: group.inventory.inHandDate || event.inHandDate || new Date(),
-                eventId: eventId,
-                mapping_id: event.mapping_id || eventId,
-                event_name: event.Event_Name,
-                venue_name: event.Venue,
-                event_date: event.Event_DateTime,
                 tickets: group.inventory.tickets.map((ticket) => ({
                   ...ticket,
-                  sellPrice: typeof ticket.sellPrice === 'number' && !isNaN(ticket.sellPrice) 
-                    ? ticket.sellPrice * 1.25 // Apply 1.25 markup as in original
-                    : parseFloat(ticket.cost || ticket.faceValue || 0) * 1.25, // Fallback to cost or faceValue if sellPrice is invalid
+                  sellPrice:
+                    typeof ticket.sellPrice === "number" &&
+                    !isNaN(ticket.sellPrice)
+                      ? ticket.sellPrice * 1.25 // Apply 1.25 markup as in original
+                      : parseFloat(ticket.cost || ticket.faceValue || 0) * 1.25, // Fallback to cost or faceValue if sellPrice is invalid
                 })),
               },
             }));
 
             // Use fewer documents in a single batch insert
-            if (LOG_LEVEL >= 2 && groupsToInsert.length > 0) { // Assuming 2 is info level
-              this.logger.logWithTime(`[Info ${eventId}] Inserting ${groupsToInsert.length} groups in chunks. First group sample: ${JSON.stringify(groupsToInsert[0], null, 2)}`, "info");
+            if (LOG_LEVEL >= 2 && groupsToInsert.length > 0) {
+              // Assuming 2 is info level
+              this.logger.logWithTime(
+                `[Info ${eventId}] Inserting ${
+                  groupsToInsert.length
+                } groups in chunks. First group sample: ${JSON.stringify(
+                  groupsToInsert[0],
+                  null,
+                  2
+                )}`,
+                "info"
+              );
             }
-            for (let i = 0; i < groupsToInsert.length; i += CHUNK_SIZE) { // Using CHUNK_SIZE defined at the top
+            for (let i = 0; i < groupsToInsert.length; i += CHUNK_SIZE) {
+              // Using CHUNK_SIZE defined at the top
               const chunk = groupsToInsert.slice(i, i + CHUNK_SIZE);
-              try {
-                await ConsecutiveGroup.insertMany(chunk, { session, ordered: false });
-              } catch (error) {
-                this.logger.logWithTime(`[ERROR] Event ${eventId} - Failed to insert ConsecutiveGroup chunk: ${error.message}`, "error");
-                // Log specific duplicate key errors for debugging
-                if (error.code === 11000 && error.writeErrors) {
-                  const duplicateErrors = error.writeErrors.filter(e => e.code === 11000);
-                  if (duplicateErrors.length > 0) {
-                    this.logger.logWithTime(`[DEBUG] Event ${eventId} - ${duplicateErrors.length} duplicate key errors detected`, "debug");
-                    duplicateErrors.slice(0, 3).forEach((dupError, index) => {
-                      this.logger.logWithTime(`[DEBUG] Event ${eventId} - Duplicate ${index + 1}: ${JSON.stringify(dupError.keyValue)}`, "debug");
-                    });
-                  }
-                }
-                // Continue with next chunk even if this one fails
-              }
+              await ConsecutiveGroup.insertMany(chunk, { session });
             }
-            if (LOG_LEVEL >= 2) { // Assuming 2 is info level
-              this.logger.logWithTime(`[Info ${eventId}] Successfully updated ${groupsToInsert.length} consecutive groups.`, "info");
+            if (LOG_LEVEL >= 2) {
+              // Assuming 2 is info level
+              this.logger.logWithTime(
+                `[Info ${eventId}] Successfully updated ${groupsToInsert.length} consecutive groups.`,
+                "info"
+              );
             }
           } else {
-            if (LOG_LEVEL >= 3) { // Assuming 3 is a debug level
-              this.logger.logWithTime(`[Debug ${eventId}] No change detected for ConsecutiveGroup. Skipping update.`, "debug");
+            if (LOG_LEVEL >= 3) {
+              // Assuming 3 is a debug level
+              this.logger.logWithTime(
+                `[Debug ${eventId}] No change detected for ConsecutiveGroup. Skipping update.`,
+                "debug"
+              );
             }
           }
         }
@@ -190,14 +218,14 @@ class DatabaseManager {
 
       // Schedule next update time
       const nextUpdate = scheduler.scheduleNextUpdate(eventId);
-      
+
       this.logger.logWithTime(
         `Updated event ${eventId} in ${(performance.now() - startTime).toFixed(
           2
-        )}ms, next update by ${nextUpdate.format('HH:mm:ss')}`,
+        )}ms, next update by ${nextUpdate.format("HH:mm:ss")}`,
         "success"
       );
-      
+
       return true;
     } catch (error) {
       this.logger.logError(eventId, "DATABASE_ERROR", error);
