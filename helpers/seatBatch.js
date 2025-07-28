@@ -584,9 +584,7 @@ export const AttachRowSection = (
         if (offerGet) {
           if (offerGet.name == "Special Offers") {
             return undefined;
-          } else if (offerGet.name == "Summer's Live 4 Pack") {
-            return undefined;
-          } else if (offerGet.name == "Me + 3 4-Pack Offer") {
+          } else if (/4[\s-]*pack/i.test(offerGet.name)) {
             return undefined;
           } else if (offerGet?.protected == true) {
             return undefined;
