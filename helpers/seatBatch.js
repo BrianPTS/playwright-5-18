@@ -588,12 +588,15 @@ export const AttachRowSection = (
             return undefined;
           } else if (offerGet.name == "Me + 3 4-Pack Offer") {
             return undefined;
-          }  else {
+          } else if (offerGet?.protected == true) {
+            return undefined;
+          } else {
             return CreateInventoryAndLine(x, offerGet, event, descriptions);
           }
         } else {
           return undefined;
         }
+        
       })
       .filter((x) => x != undefined)
       .filter((obj, index, self) => {
