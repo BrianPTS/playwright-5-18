@@ -1071,7 +1071,7 @@ export class ScraperManager {
           
           const basePrice = parseFloat(group.inventory.listPrice);
           const increasedPrice = basePrice < 35 
-            ? basePrice + 10 
+            ? basePrice + 15 
             : basePrice * (1 + priceIncreasePercentage / 100);
 
           newRowMap.set(rowKey, {
