@@ -242,7 +242,8 @@ function CreateInventoryAndLine(data, offer, event, descriptions) {
   if (isNameAdded == false) {
     if (_descriptions) {
       _descriptions.descriptions.map((x) => {
-        if (x.toLowerCase().includes("side")) {
+        // need to make it better it is not good way to check
+        if (x.toLowerCase().includes("side view")) {
           allDescriptions += ", Side View";
         } else if (x.toLowerCase().includes("behind")) {
           allDescriptions += ", Behind The Stage";
