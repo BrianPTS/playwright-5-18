@@ -20,8 +20,8 @@ class InventoryApi {
     }
     
     this.headers = {
-      'X-Company-Id': process.env.SEATSCOUTS_COMPANY_ID,
-      'X-Api-Token': process.env.SEATSCOUTS_API_TOKEN,
+      'X-Company-Id': process.env.SYNC_COMPANY_ID,
+      'X-Api-Token': process.env.SYNC_API_TOKEN,
       'Content-Type': 'application/json',
       'Accept': 'application/json'
     };
