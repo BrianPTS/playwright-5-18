@@ -93,18 +93,38 @@ function startServerWithPortFallback(currentPort, attempt = 0, maxAttempts = 20)
 
     // Check for --start-scraper argument
     if (process.argv.includes('--start-scraper')) {
-      console.log('Command-line argument --start-scraper detected. Attempting to start scraper...');
-      if (scraperManager && scraperManager.isRunning) {
-        console.log("Scraper is already running.");
-      } else if (scraperManager && typeof scraperManager.startContinuousScraping === 'function') {
-        scraperManager.startContinuousScraping().catch((error) => {
+      console.log('Command-line argument --start-scraper detected. Waiting for database connection...');
+      
+      // Wait a bit for database connection to be fully established
+      setTimeout(async () => {
+        try {
+          // Verify database connection
+          if (mongoose.connection.readyState !== 1) {
+            console.log('Waiting for MongoDB connection to be established...');
+            await new Promise((resolve) => {
+              if (mongoose.connection.readyState === 1) {
+                resolve();
+              } else {
+                mongoose.connection.once('connected', resolve);
+              }
+            });
+          }
+          
+          console.log('Database connection verified. Starting scraper...');
+          
+          if (scraperManager && scraperManager.isRunning) {
+            console.log("Scraper is already running.");
+          } else if (scraperManager && typeof scraperManager.startContinuousScraping === 'function') {
+            await scraperManager.startContinuousScraping();
+            console.log("Scraper initiated via command line.");
+          } else {
+            console.error("Scraper manager or startContinuousScraping method is not available.");
+          }
+        } catch (error) {
           console.error("Error starting scraper from command line:", error);
           if (scraperManager) scraperManager.isRunning = false;
-        });
-        console.log("Scraper initiated via command line.");
-      } else {
-        console.error("Scraper manager or startContinuousScraping method is not available.");
-      }
+        }
+      }, 2000); // Wait 2 seconds for database connection to stabilize
     }
   });
 

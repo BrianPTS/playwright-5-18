@@ -16,7 +16,7 @@ class LoggerIntegration {
   
   integrateLogger() {
     // Replace the original logWithTime method
-    this.scraperManager.logWithTime = async (message, type = "info") => {
+    this.scraperManager.logWithTime = async (message, type = "error") => {
       // Call original method for console output
       this.originalLogWithTime(message, type);
       
@@ -52,7 +52,8 @@ class LoggerIntegration {
       'info': 'INFO',
       'debug': 'INFO'
     };
-    return mapping[type] || 'INFO';
+    return mapping[type] || '
+    ';
   }
   
   async logEnhancedError(eventId, errorType, error, metadata = {}) {

@@ -10,6 +10,15 @@ dotenv.config();
 class InventoryApi {
   constructor() {
     this.baseURL = 'https://app.seatscouts.com/sync/api';
+    
+    // Validate environment variables
+    if (!process.env.SYNC_COMPANY_ID) {
+      throw new Error('SYNC_COMPANY_ID environment variable is required');
+    }
+    if (!process.env.SYNC_API_TOKEN) {
+      throw new Error('SYNC_API_TOKEN environment variable is required');
+    }
+    
     this.headers = {
       'X-Company-Id': process.env.SEATSCOUTS_COMPANY_ID,
       'X-Api-Token': process.env.SEATSCOUTS_API_TOKEN,
@@ -39,10 +48,15 @@ class InventoryApi {
         count: inventoryIds.length,
         headers: {
           'X-Company-Id': this.headers['X-Company-Id'],
-          'X-Api-Token': this.headers['X-Api-Token'],
+          'X-Api-Token': this.headers['X-Api-Token'] ? `${this.headers['X-Api-Token'].substring(0, 10)}...` : undefined, // Mask token for security
           'Content-Type': this.headers['Content-Type']
         }
       });
+
+      // Additional validation before making the request
+      if (!this.headers['X-Company-Id'] || !this.headers['X-Api-Token']) {
+        throw new Error(`Missing API credentials: Company ID: ${!!this.headers['X-Company-Id']}, API Token: ${!!this.headers['X-Api-Token']}`);
+      }
 
       const response = await axios.post(`${this.baseURL}/inventories/delete`, {
         inventory_ids: inventoryIds
@@ -51,7 +65,8 @@ class InventoryApi {
         timeout: 15000 // 15 second timeout for batch operations
       });
 
-      console.log(`[API DEBUG] Batch deletion successful:`, response.status, response.data);
+      console.log(`[API SUCCESS] Batch deletion request for ${inventoryIds.length} items responded with status ${response.status}.`);
+      console.log('[API RESPONSE DATA]', JSON.stringify(response.data, null, 2));
 
       return {
         successful: inventoryIds, // Assume all successful if no error
@@ -60,11 +75,9 @@ class InventoryApi {
         apiResponse: response.data
       };
     } catch (error) {
-      console.error(`Failed to delete inventory batch:`, error.message);
+      console.error(`[API ERROR] Failed to delete inventory batch for ${inventoryIds.length} items:`, error.message);
       if (error.response) {
-        console.error(`[API DEBUG] Response status:`, error.response.status);
-        console.error(`[API DEBUG] Response data:`, error.response.data);
-        console.error(`[API DEBUG] Response headers:`, error.response.headers);
+        console.error(`[API ERROR DETAILS] Status: ${error.response.status}, Data: ${JSON.stringify(error.response.data, null, 2)}`);
       }
       
       // Return failed result for all inventory IDs since batch deletion failed

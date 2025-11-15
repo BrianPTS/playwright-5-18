@@ -4,7 +4,7 @@ import * as fs from 'fs';
 
 // Global Filters
 const GLOBAL_FILTERS = {
-  inventoryType: ["Primary", "Official Platinum", "Aisle Seating","Standard","Standard Ticket","resale"], // e.g., ['primary', 'resale'] - empty means no filter, strings to check for (case-insensitive)
+  inventoryType: ["Primary", "Official Platinum","resale", "Aisle Seating","Standard","Standard Ticket",], // e.g., ['primary', 'resale'] - empty means no filter, strings to check for (case-insensitive)
 
 
   inventoryStatus: ["Available"], // e.g., ['available', 'sold'] - empty means no filter, strings to check for (case-insensitive)
@@ -242,7 +242,8 @@ function CreateInventoryAndLine(data, offer, event, descriptions) {
   if (isNameAdded == false) {
     if (_descriptions) {
       _descriptions.descriptions.map((x) => {
-        if (x.toLowerCase().includes("side")) {
+        // need to make it better it is not good way to check
+        if (x.toLowerCase().includes("side view")) {
           allDescriptions += ", Side View";
         } else if (x.toLowerCase().includes("behind")) {
           allDescriptions += ", Behind The Stage";
@@ -353,7 +354,6 @@ export const AttachRowSection = (
   let customData = data
     .map((x) => {
       if (!x.places || x.places.length === 0) {
-        console.warn('Empty places array for offer:', x.offerId);
         return undefined;
       }
 
@@ -363,7 +363,6 @@ export const AttachRowSection = (
         .map((placeId) => {
           const index = mapPlacesIndex.indexOf(placeId);
           if (index === -1) {
-            console.warn('Place ID not found in map:', placeId);
             return null;
           }
           
@@ -379,14 +378,12 @@ export const AttachRowSection = (
 
       // Skip if no valid seats found
       if (allPlaces.length === 0) {
-        console.warn('No valid seats found for offer:', x.offerId);
         return undefined;
       }
 
       // Verify all seats belong to same section
       const sections = Object.keys(sectionMap);
       if (sections.length > 1) {
-        console.warn('Mixed sections in seat group:', sections.join(', '));
       }
 
       return {

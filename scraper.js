@@ -1998,6 +1998,27 @@ async function refreshCookiesPeriodically() {
         // Import Event model to query the database
         const { Event } = await import('./models/index.js');
         
+        // Check if mongoose connection is ready
+        const mongoose = await import('mongoose');
+        if (mongoose.default.connection.readyState !== 1) {
+          console.warn('MongoDB connection not ready, waiting for connection...');
+          await new Promise((resolve, reject) => {
+            if (mongoose.default.connection.readyState === 1) {
+              resolve();
+            } else {
+              mongoose.default.connection.once('connected', resolve);
+              mongoose.default.connection.once('error', reject);
+              // Timeout after 10 seconds
+              setTimeout(() => reject(new Error('MongoDB connection timeout')), 10000);
+            }
+          });
+        }
+        
+        // Verify Event model is properly loaded
+        if (!Event || typeof Event.findOne !== 'function') {
+          throw new Error('Event model not properly loaded');
+        }
+        
         // Get random active events from the database
         const randomEvents = await Event.aggregate([
           {
@@ -2049,13 +2070,21 @@ async function refreshCookiesPeriodically() {
       // Fallback 2: Try direct database query with minimal conditions as last resort
       if (!eventId) {
         try {
-          const anyEvent = await Event.findOne({
-            Skip_Scraping: { $ne: true }
-          }).select('Event_ID').lean();
+          // Re-import Event model for fallback query
+          const { Event } = await import('./models/index.js');
           
-          if (anyEvent) {
-            eventId = anyEvent.Event_ID;
-            console.log(`Using last resort database event ${eventId} for cookie refresh (minimal query fallback)`);
+          // Verify Event model is available
+          if (Event && typeof Event.findOne === 'function') {
+            const anyEvent = await Event.findOne({
+              Skip_Scraping: { $ne: true }
+            }).select('Event_ID').lean();
+            
+            if (anyEvent) {
+              eventId = anyEvent.Event_ID;
+              console.log(`Using last resort database event ${eventId} for cookie refresh (minimal query fallback)`);
+            }
+          } else {
+            console.warn('Event model not available for fallback query');
           }
         } catch (dbFallbackError) {
           console.warn(`Failed to get any event from database: ${dbFallbackError.message}`);

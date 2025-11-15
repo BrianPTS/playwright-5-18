@@ -1,3 +1,4 @@
+﻿import dotenv from "dotenv";
 import moment from "moment";
 import { setTimeout } from "timers/promises";
 import { Event, ErrorLog, ConsecutiveGroup } from "./models/index.js";
@@ -13,6 +14,10 @@ import pThrottle from 'p-throttle';
 import config from './config/scraperConfig.js';
 import _ from 'lodash';
 import InventoryApi from './utils/inventoryApi.js';
+import RedisSyncManager from './helpers/RedisSyncManager.js';
+
+// Load environment variables early
+dotenv.config();
 // CSV upload functionality removed
 let inventoryIdCounter = 0;
 
@@ -172,7 +177,28 @@ export class ScraperManager {
     })(ScrapeEvent);
 
     // Initialize inventory API for external deletions
-    this.inventoryApi = new InventoryApi();
+    try {
+      console.log(`[INIT DEBUG] Environment variables check:`, {
+        SYNC_COMPANY_ID: process.env.SYNC_COMPANY_ID,
+        SYNC_API_TOKEN: process.env.SYNC_API_TOKEN ? `${process.env.SYNC_API_TOKEN.substring(0, 10)}...` : undefined
+      });
+      this.inventoryApi = new InventoryApi();
+      console.log(`[INIT DEBUG] InventoryApi initialized successfully`);
+    } catch (error) {
+      console.error(`[INIT ERROR] Failed to initialize InventoryApi:`, error.message);
+      throw error;
+    }
+
+    // Initialize Redis real-time synchronization manager
+    try {
+      this.redisSyncManager = new RedisSyncManager();
+      this.setupRealTimeSyncHandlers();
+      console.log(`[INIT DEBUG] Redis real-time sync initialized successfully`);
+    } catch (error) {
+      console.error(`[INIT ERROR] Failed to initialize Redis sync:`, error.message);
+      // Continue without Redis sync in case Redis is not available
+      this.redisSyncManager = null;
+    }
   }
 
   logWithTime(message, type = "info") {
@@ -195,12 +221,12 @@ export class ScraperManager {
 
     const statusEmoji =
       {
-        success: "✅",
-        error: "❌",
-        warning: "⚠️",
-        info: "ℹ️",
-        debug: "🔍",
-      }[type] || "📝";
+        success: "âœ…",
+        error: "âŒ",
+        warning: "âš ï¸",
+        info: "â„¹ï¸",
+        debug: "ðŸ”",
+      }[type] || "ðŸ“";
 
     // Only include detailed stats for errors or if we're at the highest verbosity
     if (type === "error" || LOG_LEVEL >= 3) {
@@ -215,6 +241,79 @@ export class ScraperManager {
     } else {
       console.log(`${statusEmoji} [${formattedTime}] ${message}`);
     }
+  }
+
+  setupRealTimeSyncHandlers() {
+    if (!this.redisSyncManager) return;
+
+    // Handle real-time event updates from other instances
+    this.redisSyncManager.on('eventUpdate', async (data) => {
+      const { eventId, data: eventData } = data;
+      console.log(`[REDIS SYNC] Received event update notification for ${eventId}`);
+      
+      // Clear local caches for this event to force fresh database read
+      this.eventUpdateTimestamps.delete(eventId);
+      this.cooldownEvents.delete(eventId);
+      this.failedEvents.delete(eventId);
+      
+      // Update local tracking
+      this.eventUpdateTimestamps.set(eventId, moment());
+    });
+
+    // Handle real-time event deletions from other instances
+    this.redisSyncManager.on('eventDelete', async (data) => {
+      const { eventId } = data;
+      console.log(`[REDIS SYNC] Received event deletion notification for ${eventId}`);
+      
+      // Immediately remove from all local tracking
+      this.eventUpdateTimestamps.delete(eventId);
+      this.cooldownEvents.delete(eventId);
+      this.failedEvents.delete(eventId);
+      this.activeJobs.delete(eventId);
+      this.eventUpdateSchedule.delete(eventId);
+      
+      // Stop any active scraping for this event
+      if (this.activeJobs.has(eventId)) {
+        console.log(`[REDIS SYNC] Stopping active job for deleted event ${eventId}`);
+      }
+    });
+
+    // Handle real-time inventory updates from other instances
+    this.redisSyncManager.on('inventoryUpdate', async (data) => {
+      const { eventId, inventoryIds } = data;
+      console.log(`[REDIS SYNC] Received inventory update notification for event ${eventId}`);
+      
+      // Force refresh of event data on next scrape
+      this.eventUpdateTimestamps.delete(eventId);
+    });
+
+    // Handle real-time inventory deletions from other instances
+    this.redisSyncManager.on('inventoryDelete', async (data) => {
+      const { eventId, inventoryIds } = data;
+      console.log(`[REDIS SYNC] Received inventory deletion notification for event ${eventId}, items: ${inventoryIds.length}`);
+      
+      // Force refresh of event data on next scrape
+      this.eventUpdateTimestamps.delete(eventId);
+    });
+
+    // Handle scraper status updates from other instances
+    this.redisSyncManager.on('scraperStatus', async (data) => {
+      const { status, sourceInstanceId } = data;
+      console.log(`[REDIS SYNC] Instance ${sourceInstanceId} status: ${status.type}`);
+    });
+
+    // Handle global notifications
+    this.redisSyncManager.on('globalNotification', async (data) => {
+      const { type, sourceInstanceId } = data;
+      
+      if (type === 'INSTANCE_JOIN') {
+        console.log(`[REDIS SYNC] New scraper instance joined: ${sourceInstanceId}`);
+      } else if (type === 'INSTANCE_LEAVE') {
+        console.log(`[REDIS SYNC] Scraper instance left: ${sourceInstanceId}`);
+      }
+    });
+
+    console.log(`[REDIS SYNC] Real-time sync handlers configured`);
   }
 
   async logError(eventId, errorType, error, metadata = {}) {
@@ -983,7 +1082,7 @@ export class ScraperManager {
       const currentTicketCount = validScrapeResult.length;
 
         // Quick update of basic info
-        await Event.updateOne(
+        const updateResult = await Event.updateOne(
           { Event_ID: eventId },
           {
             $set: {
@@ -994,6 +1093,16 @@ export class ScraperManager {
             },
           }
         ).session(session);
+
+        // Notify other instances of real-time event update
+        if (this.redisSyncManager && updateResult.modifiedCount > 0) {
+          await this.redisSyncManager.publishEventUpdate({
+            Event_ID: eventId,
+            Available_Seats: currentTicketCount,
+            Last_Updated: new Date(),
+            updateType: 'SCRAPE_UPDATE'
+          });
+        }
 
       const LOG_LEVEL =
         global.config && typeof global.config.LOG_LEVEL !== "undefined"
@@ -1179,9 +1288,14 @@ export class ScraperManager {
                 .map(id => String(id)); // Convert to strings for API
 
               // Delete from database first
-              await ConsecutiveGroup.deleteMany({
+              const deleteResult = await ConsecutiveGroup.deleteMany({
                 _id: { $in: rowsToDelete },
               }).session(session);
+
+              // Notify other instances of real-time inventory deletion
+              if (this.redisSyncManager && deleteResult.deletedCount > 0 && inventoryIdsToDelete.length > 0) {
+                await this.redisSyncManager.publishInventoryDelete(eventId, inventoryIdsToDelete);
+              }
 
               // Then delete from external API if we have inventory IDs
               if (inventoryIdsToDelete.length > 0) {
@@ -1367,16 +1481,36 @@ export class ScraperManager {
 
             // Insert new inventory items in batches
             const BATCH_SIZE = 100;
+            const insertedInventoryIds = [];
+            
             for (let i = 0; i < newInventoryItems.length; i += BATCH_SIZE) {
               const batch = newInventoryItems.slice(i, i + BATCH_SIZE);
               try {
-                await ConsecutiveGroup.insertMany(batch, { ordered: false, session: session });
+                const insertResult = await ConsecutiveGroup.insertMany(batch, { ordered: false, session: session });
+                
+                // Collect inventory IDs for real-time notification
+                const batchInventoryIds = insertResult
+                  .map(item => item.inventory?.inventoryId)
+                  .filter(id => id)
+                  .map(id => String(id));
+                insertedInventoryIds.push(...batchInventoryIds);
+                
               } catch (error) {
                 console.error(
                   `[ERROR] Event ${eventId} - Failed to insert updated ConsecutiveGroup batch:`,
                   error.message
                 );
               }
+            }
+
+            // Notify other instances of real-time inventory additions
+            if (this.redisSyncManager && insertedInventoryIds.length > 0) {
+              await this.redisSyncManager.publishInventoryUpdate({
+                Event_ID: eventId,
+                inventoryIds: insertedInventoryIds,
+                updateType: 'INVENTORY_ADD',
+                count: insertedInventoryIds.length
+              });
             }
 
             if (LOG_LEVEL >= 2) {
@@ -1856,6 +1990,16 @@ export class ScraperManager {
     this.processingEvents.clear();
     // No batch processing to clear
 
+    // Shutdown Redis real-time sync manager
+    if (this.redisSyncManager) {
+      try {
+        await this.redisSyncManager.shutdown();
+        this.logWithTime("Redis real-time sync manager shut down", "info");
+      } catch (error) {
+        this.logWithTime(`Error shutting down Redis sync manager: ${error.message}`, "error");
+      }
+    }
+
     this.logWithTime("Continuous scraping process stopped", "success");
 
     // Return runtime statistics
@@ -1953,7 +2097,7 @@ export class ScraperManager {
     // Log health status if there are issues
     if (stuckEvents > 0 || failedEventsCount > 10) {
       this.logWithTime(
-        `🏥 Health Check: ${stuckEvents} stuck events, ${failedEventsCount} failed, ${processingQueueSize} processing, ${successRate}% success rate`,
+        `ðŸ¥ Health Check: ${stuckEvents} stuck events, ${failedEventsCount} failed, ${processingQueueSize} processing, ${successRate}% success rate`,
         "warning"
       );
     } else {
@@ -1961,7 +2105,7 @@ export class ScraperManager {
       if (now % 300000 < 60000) {
         // Every 5 minutes
         this.logWithTime(
-          `✅ Health Check: System healthy - ${successRate}% success rate, ${processingQueueSize} events processing`,
+          `âœ… Health Check: System healthy - ${successRate}% success rate, ${processingQueueSize} events processing`,
           "info"
         );
       }
@@ -2467,7 +2611,7 @@ export class ScraperManager {
                 this.eventLastProcessedTime.set(eventId, Date.now());
                 this.resetEventFailureTracking(eventId);
                 this.logWithTime(
-                  `✅ Successfully processed event ${eventId}`,
+                  `âœ… Successfully processed event ${eventId}`,
                   "success"
                 );
                 return { eventId, success: true };
@@ -2477,7 +2621,7 @@ export class ScraperManager {
               }
             } catch (error) {
               this.logWithTime(
-                `❌ Error processing event ${eventId}: ${error.message}`,
+                `âŒ Error processing event ${eventId}: ${error.message}`,
                 "error"
               );
               await this.handleEventFailureGracefully(eventId);
@@ -2601,7 +2745,7 @@ export class ScraperManager {
         baseDelay * Math.pow(1.4, newFailureCount)
       );
 
-      // Add random jitter (±30%) to prevent synchronized retries
+      // Add random jitter (Â±30%) to prevent synchronized retries
       const jitter = backoffDelay * 0.3 * (Math.random() - 0.5);
       backoffDelay = Math.max(1000, backoffDelay + jitter);
 
@@ -2627,7 +2771,7 @@ export class ScraperManager {
       }
 
       this.logWithTime(
-        `⚠️ Event ${eventId} failed (${newFailureCount} failures), backing off for ${Math.round(
+        `âš ï¸ Event ${eventId} failed (${newFailureCount} failures), backing off for ${Math.round(
           backoffDelay / 1000
         )}s`,
         "warning"
@@ -3041,7 +3185,7 @@ export class ScraperManager {
 
       const processingTime = Date.now() - startTime;
       this.logWithTime(
-        `✅ Natural processing completed for ${eventId} in ${processingTime}ms`,
+        `âœ… Natural processing completed for ${eventId} in ${processingTime}ms`,
         "success"
       );
 
@@ -3050,7 +3194,7 @@ export class ScraperManager {
       // Enhanced error handling with context
       const processingTime = Date.now() - startTime;
       this.logWithTime(
-        `❌ Natural processing failed for ${eventId} after ${processingTime}ms: ${error.message}`,
+        `âŒ Natural processing failed for ${eventId} after ${processingTime}ms: ${error.message}`,
         "error"
       );
 
@@ -3088,6 +3232,22 @@ export class ScraperManager {
       return true; // Skip if processed in last 30 seconds
     }
 
+    // Use distributed locking to prevent multiple instances from processing the same event simultaneously
+    let lockValue = null;
+    if (this.redisSyncManager) {
+      try {
+        lockValue = await this.redisSyncManager.acquireLock(`event:${eventId}`, 60000); // 1 minute lock
+        if (!lockValue) {
+          console.log(`[DISTRIBUTED LOCK] Event ${eventId} is being processed by another instance, skipping`);
+          return true;
+        }
+        console.log(`[DISTRIBUTED LOCK] Acquired lock for event ${eventId}`);
+      } catch (error) {
+        console.error(`[DISTRIBUTED LOCK ERROR] Failed to acquire lock for event ${eventId}:`, error.message);
+        // Continue without lock if Redis fails
+      }
+    }
+
     let proxyAgent = null;
     let proxy = null;
 
@@ -3108,6 +3268,19 @@ export class ScraperManager {
       } catch (proxyError) {
         this.logWithTime(
           `Error getting proxy for ${eventId}: ${proxyError.message}`,
+          "warning"
+        );
+      }
+
+      // Ensure proxy is defined - fallback if no proxy was obtained
+      if (!proxy) {
+        proxy = {
+          proxy: "default",
+          host: "localhost",
+          port: "default"
+        };
+        this.logWithTime(
+          "No proxy available for ${eventId}, using default",
           "warning"
         );
       }
@@ -3228,7 +3401,7 @@ export class ScraperManager {
       } else if (retryCount >= MAX_RETRIES) {
         // Log the failure without scheduling recovery
         this.logWithTime(
-          `❌ Event ${eventId} exceeded MAX_RETRIES (${MAX_RETRIES}). No recovery scheduled. Time since update: ${Math.floor(
+          `âŒ Event ${eventId} exceeded MAX_RETRIES (${MAX_RETRIES}). No recovery scheduled. Time since update: ${Math.floor(
             timeSinceUpdate / 1000
           )}s.`,
           "warning"
@@ -3236,7 +3409,7 @@ export class ScraperManager {
       } else {
         // Log the failure without retry
         this.logWithTime(
-          `❌ Event ${eventId} failed. No retry scheduled. Time since update: ${Math.floor(
+          `âŒ Event ${eventId} failed. No retry scheduled. Time since update: ${Math.floor(
             timeSinceUpdate / 1000
           )}s.`,
           "info"
@@ -3244,6 +3417,16 @@ export class ScraperManager {
       }
 
       return false;
+    } finally {
+      // Always release distributed lock when function completes
+      if (this.redisSyncManager && lockValue) {
+        try {
+          await this.redisSyncManager.releaseLock(`event:${eventId}`, lockValue);
+          console.log(`[DISTRIBUTED LOCK] Released lock for event ${eventId}`);
+        } catch (error) {
+          console.error(`[DISTRIBUTED LOCK ERROR] Failed to release lock for event ${eventId}:`, error.message);
+        }
+      }
     }
   }
 
@@ -3492,12 +3675,12 @@ export class ScraperManager {
         stats.staleOver3Min.length > 0
       ) {
         this.logWithTime(
-          `⚠️ Stale Event Summary: ${stats.staleOver10Min.length} events >10min, ${stats.staleOver6Min.length} events >6min, ${stats.staleOver3Min.length} events >3min`,
+          `âš ï¸ Stale Event Summary: ${stats.staleOver10Min.length} events >10min, ${stats.staleOver6Min.length} events >6min, ${stats.staleOver3Min.length} events >3min`,
           "warning"
         );
       } else {
         this.logWithTime(
-          `✅ No stale events: ${stats.recentlyUpdated.length} events updated recently`,
+          `âœ… No stale events: ${stats.recentlyUpdated.length} events updated recently`,
           "success"
         );
       }
@@ -3506,7 +3689,7 @@ export class ScraperManager {
       if (stats.staleOver10Min.length > 0) {
         const criticalEventIds = stats.staleOver10Min.map((e) => e.eventId);
         this.logWithTime(
-          `🚨 CRITICAL: ${criticalEventIds.length} events not updated for >10 minutes`,
+          `ðŸš¨ CRITICAL: ${criticalEventIds.length} events not updated for >10 minutes`,
           "error"
         );
 
@@ -3517,7 +3700,7 @@ export class ScraperManager {
 
         // Log recovery results
         this.logWithTime(
-          `🚨 CRITICAL Recovery Results: ${recoveryResult.recovered.length} recovered, ${recoveryResult.failed.length} failed out of ${recoveryResult.attempts} attempts`,
+          `ðŸš¨ CRITICAL Recovery Results: ${recoveryResult.recovered.length} recovered, ${recoveryResult.failed.length} failed out of ${recoveryResult.attempts} attempts`,
           recoveryResult.recovered.length > 0 ? "success" : "error"
         );
 
@@ -3548,7 +3731,7 @@ export class ScraperManager {
         if (eventsToRecover.length > 0) {
           const eventIdsToRecover = eventsToRecover.map((e) => e.eventId);
           this.logWithTime(
-            `🔄 STANDARD: Attempting recovery of ${eventIdsToRecover.length} stale events (3-10 minutes old)`,
+            `ðŸ”„ STANDARD: Attempting recovery of ${eventIdsToRecover.length} stale events (3-10 minutes old)`,
             "warning"
           );
 
@@ -3559,7 +3742,7 @@ export class ScraperManager {
 
           // Log recovery results
           this.logWithTime(
-            `🔄 STANDARD Recovery Results: ${recoveryResult.recovered.length} recovered, ${recoveryResult.failed.length} failed out of ${recoveryResult.attempts} attempts`,
+            `ðŸ”„ STANDARD Recovery Results: ${recoveryResult.recovered.length} recovered, ${recoveryResult.failed.length} failed out of ${recoveryResult.attempts} attempts`,
             recoveryResult.recovered.length > 0 ? "success" : "warning"
           );
 
@@ -3585,7 +3768,7 @@ export class ScraperManager {
 
     const criticalEventIds = criticalEvents.map((e) => e.eventId);
     this.logWithTime(
-      `🚨 CRITICAL: ${criticalEventIds.length} events not updated for >10 minutes`,
+      `ðŸš¨ CRITICAL: ${criticalEventIds.length} events not updated for >10 minutes`,
       "error"
     );
 
@@ -3596,7 +3779,7 @@ export class ScraperManager {
 
     // Log recovery results
     this.logWithTime(
-      `🚨 CRITICAL Recovery Results: ${recoveryResult.recovered.length} recovered, ${recoveryResult.failed.length} failed out of ${recoveryResult.attempts} attempts`,
+      `ðŸš¨ CRITICAL Recovery Results: ${recoveryResult.recovered.length} recovered, ${recoveryResult.failed.length} failed out of ${recoveryResult.attempts} attempts`,
       recoveryResult.recovered.length > 0 ? "success" : "error"
     );
 
@@ -3636,7 +3819,7 @@ export class ScraperManager {
 
     const eventIdsToRecover = eventsToRecover.map((e) => e.eventId);
     this.logWithTime(
-      `🔄 STANDARD: Attempting recovery of ${eventIdsToRecover.length} stale events (3-10 minutes old)`,
+      `ðŸ”„ STANDARD: Attempting recovery of ${eventIdsToRecover.length} stale events (3-10 minutes old)`,
       "warning"
     );
 
@@ -3647,7 +3830,7 @@ export class ScraperManager {
 
     // Log recovery results
     this.logWithTime(
-      `🔄 STANDARD Recovery Results: ${recoveryResult.recovered.length} recovered, ${recoveryResult.failed.length} failed out of ${recoveryResult.attempts} attempts`,
+      `ðŸ”„ STANDARD Recovery Results: ${recoveryResult.recovered.length} recovered, ${recoveryResult.failed.length} failed out of ${recoveryResult.attempts} attempts`,
       recoveryResult.recovered.length > 0 ? "success" : "warning"
     );
 
@@ -3682,7 +3865,7 @@ export class ScraperManager {
     }
 
     this.logWithTime(
-      `🚨 Starting AGGRESSIVE recovery for ${eventIds.length} critically stale events`,
+      `ðŸš¨ Starting AGGRESSIVE recovery for ${eventIds.length} critically stale events`,
       "warning"
     );
 
@@ -3691,7 +3874,7 @@ export class ScraperManager {
         results.attempts++;
 
         this.logWithTime(
-          `🔧 AGGRESSIVE recovery attempt for event ${eventId}`,
+          `ðŸ”§ AGGRESSIVE recovery attempt for event ${eventId}`,
           "warning"
         );
 
@@ -3823,7 +4006,7 @@ export class ScraperManager {
               recovered = true;
               results.recovered.push(eventId);
               this.logWithTime(
-                `✅ AGGRESSIVE recovery SUCCESS for event ${eventId} using strategy "${strategy}"`,
+                `âœ… AGGRESSIVE recovery SUCCESS for event ${eventId} using strategy "${strategy}"`,
                 "success"
               );
 
@@ -3846,7 +4029,7 @@ export class ScraperManager {
         if (!recovered) {
           results.failed.push(eventId);
           this.logWithTime(
-            `❌ AGGRESSIVE recovery FAILED for event ${eventId} - tried all strategies`,
+            `âŒ AGGRESSIVE recovery FAILED for event ${eventId} - tried all strategies`,
             "error"
           );
 
@@ -3859,7 +4042,7 @@ export class ScraperManager {
       } catch (error) {
         results.failed.push(eventId);
         this.logWithTime(
-          `💥 AGGRESSIVE recovery ERROR for ${eventId}: ${error.message}`,
+          `ðŸ’¥ AGGRESSIVE recovery ERROR for ${eventId}: ${error.message}`,
           "error"
         );
       }
@@ -3892,7 +4075,7 @@ export class ScraperManager {
         results.attempts++;
 
         this.logWithTime(
-          `🔄 INTENSIVE recovery attempt for event ${eventId}`,
+          `ðŸ”„ INTENSIVE recovery attempt for event ${eventId}`,
           "info"
         );
 
@@ -3961,7 +4144,7 @@ export class ScraperManager {
               recovered = true;
               results.recovered.push(eventId);
               this.logWithTime(
-                `✅ INTENSIVE recovery SUCCESS for event ${eventId} using approach "${approach}"`,
+                `âœ… INTENSIVE recovery SUCCESS for event ${eventId} using approach "${approach}"`,
                 "success"
               );
 
@@ -3984,7 +4167,7 @@ export class ScraperManager {
         if (!recovered) {
           results.failed.push(eventId);
           this.logWithTime(
-            `❌ INTENSIVE recovery FAILED for event ${eventId} - tried all approaches`,
+            `âŒ INTENSIVE recovery FAILED for event ${eventId} - tried all approaches`,
             "warning"
           );
         }
@@ -3994,7 +4177,7 @@ export class ScraperManager {
       } catch (error) {
         results.failed.push(eventId);
         this.logWithTime(
-          `💥 INTENSIVE recovery ERROR for ${eventId}: ${error.message}`,
+          `ðŸ’¥ INTENSIVE recovery ERROR for ${eventId}: ${error.message}`,
           "error"
         );
       }
@@ -4105,7 +4288,7 @@ export class ScraperManager {
         if (lockTime < fiveMinutesAgo) {
           this.processingLocks.delete(eventId);
           this.logWithTime(
-            `🔓 Released stuck processing lock for event ${eventId} (locked for ${Math.floor(
+            `ðŸ”“ Released stuck processing lock for event ${eventId} (locked for ${Math.floor(
               (Date.now() - lockTime) / 1000
             )}s)`,
             "warning"
@@ -4116,7 +4299,7 @@ export class ScraperManager {
       const cleanedCount = beforeCount - this.eventUpdateTimestamps.size;
 
       this.logWithTime(
-        `🧽 FORCE CLEANUP: Removed ${cleanedCount} stale events | ` +
+        `ðŸ§½ FORCE CLEANUP: Removed ${cleanedCount} stale events | ` +
           `Active events in DB: ${activeEventIds.size} | Now tracking: ${this.eventUpdateTimestamps.size} | ` +
           `Active tracking: ${JSON.stringify(activeCounts)}`,
         "info"
@@ -4205,13 +4388,13 @@ export class ScraperManager {
 
       if (cleanedEvents > 0) {
         this.logWithTime(
-          `🧹 Cleaned up ${cleanedEvents} inactive events from tracking Maps | ` +
+          `ðŸ§¹ Cleaned up ${cleanedEvents} inactive events from tracking Maps | ` +
             `Active in DB: ${activeEventIds.size} | Still tracking: ${this.eventUpdateTimestamps.size}`,
           "info"
         );
       } else if (this.eventUpdateTimestamps.size > activeEventIds.size * 2) {
         this.logWithTime(
-          `⚠️ Tracking accumulation detected: tracking ${this.eventUpdateTimestamps.size} events but only ${activeEventIds.size} active in DB`,
+          `âš ï¸ Tracking accumulation detected: tracking ${this.eventUpdateTimestamps.size} events but only ${activeEventIds.size} active in DB`,
           "warning"
         );
       }
@@ -4329,7 +4512,7 @@ export class ScraperManager {
       if (timeSinceLastSuccess > 300000) {
         // 5 minutes
         this.logWithTime(
-          `⚠️ SYSTEM STALLED: No successful scrapes in ${Math.floor(
+          `âš ï¸ SYSTEM STALLED: No successful scrapes in ${Math.floor(
             timeSinceLastSuccess / 60000
           )} minutes - initiating emergency recovery!`,
           "error"
@@ -4408,17 +4591,17 @@ export class ScraperManager {
       // Check if we can handle 1000+ events
       if (projectedCapacity >= 1000) {
         this.logWithTime(
-          `✅ System capable of handling 1000+ events (current capacity: ${projectedCapacity} events/3min)`,
+          `âœ… System capable of handling 1000+ events (current capacity: ${projectedCapacity} events/3min)`,
           "success"
         );
       } else if (projectedCapacity >= 500) {
         this.logWithTime(
-          `⚠️ System handling ${projectedCapacity} events/3min - scaling needed for 1000+`,
+          `âš ï¸ System handling ${projectedCapacity} events/3min - scaling needed for 1000+`,
           "warning"
         );
       } else {
         this.logWithTime(
-          `❌ System only handling ${projectedCapacity} events/3min - major optimization needed`,
+          `âŒ System only handling ${projectedCapacity} events/3min - major optimization needed`,
           "error"
         );
       }
@@ -4429,7 +4612,7 @@ export class ScraperManager {
    * Emergency recovery procedure when system is completely stuck
    */
   async performEmergencyRecovery() {
-    this.logWithTime("🚨 INITIATING EMERGENCY SYSTEM RECOVERY 🚨", "error");
+    this.logWithTime("ðŸš¨ INITIATING EMERGENCY SYSTEM RECOVERY ðŸš¨", "error");
 
     try {
       // 1. Reset all processing maps and sets
@@ -4513,7 +4696,7 @@ export class ScraperManager {
       this.concurrencySemaphore = config.CONCURRENT_LIMIT;
 
       this.logWithTime(
-        "🔄 EMERGENCY RECOVERY COMPLETE - resuming operation",
+        "ðŸ”„ EMERGENCY RECOVERY COMPLETE - resuming operation",
         "success"
       );
       return true;
@@ -4691,7 +4874,7 @@ export class ScraperManager {
 
     if (LOG_LEVEL >= 3) {
       this.logWithTime(
-        `🧹 Cleaned up all tracking data for event ${eventId}`,
+        `ðŸ§¹ Cleaned up all tracking data for event ${eventId}`,
         "debug"
       );
     }
@@ -4740,7 +4923,7 @@ export class ScraperManager {
       );
 
       this.logWithTime(
-        `🚫 STOPPED event ${eventId}: Skip_Scraping = true (Reason: ${reason}, Retries: ${retryCount}/${retryLimit}, Time since update: ${Math.floor(
+        `ðŸš« STOPPED event ${eventId}: Skip_Scraping = true (Reason: ${reason}, Retries: ${retryCount}/${retryLimit}, Time since update: ${Math.floor(
           timeSinceUpdate / 1000
         )}s) - excluded from future scraping`,
         "warning"

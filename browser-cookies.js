@@ -101,7 +101,7 @@ async function simulateMobileInteractions(page) {
     
     // Random scroll amounts
     const scrollOptions = [
-      { direction: 'down', amount: 300 },
+      { direction: 'down', amount: 200 },
       { direction: 'down', amount: 500 },
       { direction: 'down', amount: 800 },
       { direction: 'up', amount: 200 },
