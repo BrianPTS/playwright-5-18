@@ -35,10 +35,6 @@ class RedisSyncManager extends EventEmitter {
     this.publisher = null;
     this.subscriber = null;
     
-    // Distributed lock settings
-    this.lockTimeout = 30000; // 30 seconds default lock timeout
-    this.lockRetryInterval = 100; // 100ms retry interval
-    
     // Event channels for real-time synchronization
     this.channels = {
       EVENT_UPDATE: 'realtime:event:update',
@@ -276,62 +272,11 @@ class RedisSyncManager extends EventEmitter {
     await this.publisher.publish(this.channels.GLOBAL_NOTIFICATION, JSON.stringify(message));
   }
 
-  // Distributed locking for preventing race conditions
-  async acquireLock(lockKey, timeout = this.lockTimeout) {
-    if (!this.isConnected) return null;
-    
-    const lockValue = `${this.instanceId}-${Date.now()}`;
-    const result = await this.publisher.set(
-      `lock:${lockKey}`,
-      lockValue,
-      'PX', timeout,
-      'NX'
-    );
-    
-    if (result === 'OK') {
-      console.log(`[REDIS LOCK] Acquired lock: ${lockKey}`);
-      return lockValue;
-    }
-    
-    return null;
-  }
+  // Distributed locking system removed
 
-  // Release distributed lock
-  async releaseLock(lockKey, lockValue) {
-    if (!this.isConnected) return false;
-    
-    const script = `
-      if redis.call("get", KEYS[1]) == ARGV[1] then
-        return redis.call("del", KEYS[1])
-      else
-        return 0
-      end
-    `;
-    
-    const result = await this.publisher.eval(script, 1, `lock:${lockKey}`, lockValue);
-    if (result === 1) {
-      console.log(`[REDIS LOCK] Released lock: ${lockKey}`);
-      return true;
-    }
-    
-    return false;
-  }
 
-  // Wait for lock acquisition with retry
-  async waitForLock(lockKey, maxWaitTime = 10000, timeout = this.lockTimeout) {
-    const startTime = Date.now();
-    
-    while (Date.now() - startTime < maxWaitTime) {
-      const lockValue = await this.acquireLock(lockKey, timeout);
-      if (lockValue) {
-        return lockValue;
-      }
-      
-      await new Promise(resolve => setTimeout(resolve, this.lockRetryInterval));
-    }
-    
-    throw new Error(`Failed to acquire lock ${lockKey} within ${maxWaitTime}ms`);
-  }
+
+
 
   // Clean up old event tracker entries
   cleanupLocalEventTracker() {

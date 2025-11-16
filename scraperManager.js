@@ -3232,21 +3232,7 @@ export class ScraperManager {
       return true; // Skip if processed in last 30 seconds
     }
 
-    // Use distributed locking to prevent multiple instances from processing the same event simultaneously
-    let lockValue = null;
-    if (this.redisSyncManager) {
-      try {
-        lockValue = await this.redisSyncManager.acquireLock(`event:${eventId}`, 60000); // 1 minute lock
-        if (!lockValue) {
-          console.log(`[DISTRIBUTED LOCK] Event ${eventId} is being processed by another instance, skipping`);
-          return true;
-        }
-        console.log(`[DISTRIBUTED LOCK] Acquired lock for event ${eventId}`);
-      } catch (error) {
-        console.error(`[DISTRIBUTED LOCK ERROR] Failed to acquire lock for event ${eventId}:`, error.message);
-        // Continue without lock if Redis fails
-      }
-    }
+    // Removed Redis distributed locking system
 
     let proxyAgent = null;
     let proxy = null;
@@ -3418,15 +3404,7 @@ export class ScraperManager {
 
       return false;
     } finally {
-      // Always release distributed lock when function completes
-      if (this.redisSyncManager && lockValue) {
-        try {
-          await this.redisSyncManager.releaseLock(`event:${eventId}`, lockValue);
-          console.log(`[DISTRIBUTED LOCK] Released lock for event ${eventId}`);
-        } catch (error) {
-          console.error(`[DISTRIBUTED LOCK ERROR] Failed to release lock for event ${eventId}:`, error.message);
-        }
-      }
+      // Cleanup completed - Redis lock system removed
     }
   }
 
