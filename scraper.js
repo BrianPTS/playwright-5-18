@@ -97,8 +97,8 @@ const iphone13 = devices["iPhone 13"];
 const COOKIES_FILE = "cookies.json";
 const CONFIG = {
   COOKIE_REFRESH_INTERVAL: 24 * 60 * 60 * 1000, // 24 hours
-  PAGE_TIMEOUT: 30000, // 30 seconds for page operations
-  CHALLENGE_TIMEOUT: 8000, // 8 seconds for challenge handling
+  PAGE_TIMEOUT: 60000, // 60 seconds for page operations
+  CHALLENGE_TIMEOUT: 15000, // 15 seconds for challenge handling
 };
 
 let browser = null;
@@ -333,7 +333,15 @@ async function refreshHeaders(eventId, proxy, existingCookies = null) {
           headers: fallbackHeaders,
           proxy: proxy
         });
-      }, 30000); // 30 second timeout
+      }, 20000); // Reduced to 20s to fail faster
+      
+      // Limit queue size to prevent memory issues
+      if (cookieManager.cookieRefreshQueue.length >= 10) {
+        console.warn(`Cookie refresh queue is full (${cookieManager.cookieRefreshQueue.length}), dropping oldest request`);
+        const oldest = cookieManager.cookieRefreshQueue.shift();
+        clearTimeout(oldest.timeoutId);
+        oldest.reject(new Error('Cookie refresh queue overflow'));
+      }
       
       cookieManager.cookieRefreshQueue.push({ resolve, reject, eventId, timeoutId });
     });
@@ -377,7 +385,7 @@ async function refreshHeaders(eventId, proxy, existingCookies = null) {
     const globalTimeoutId = setTimeout(() => {
       console.error(`Global timeout reached when refreshing cookies for event ${eventIdToUse}`);
       cleanupRefreshProcess(new Error("Global timeout for cookie refresh"));
-    }, 60000); // 60 second timeout for the entire process
+    }, 90000); // 90 second timeout for the entire process (increased from 60s)
 
     // Check if we have valid cookies in memory first
     if (
