@@ -354,7 +354,6 @@ export const AttachRowSection = (
   let customData = data
     .map((x) => {
       if (!x.places || x.places.length === 0) {
-        console.warn('Empty places array for offer:', x.offerId);
         return undefined;
       }
 
@@ -364,7 +363,6 @@ export const AttachRowSection = (
         .map((placeId) => {
           const index = mapPlacesIndex.indexOf(placeId);
           if (index === -1) {
-            console.warn('Place ID not found in map:', placeId);
             return null;
           }
           
@@ -380,15 +378,14 @@ export const AttachRowSection = (
 
       // Skip if no valid seats found
       if (allPlaces.length === 0) {
-        console.warn('No valid seats found for offer:', x.offerId);
         return undefined;
       }
 
       // Verify all seats belong to same section
       const sections = Object.keys(sectionMap);
-      if (sections.length > 1) {
-        console.warn('Mixed sections in seat group:', sections.join(', '));
-      }
+      // if (sections.length > 1) {
+      //   console.warn('Mixed sections in seat group:', sections.join(', '));
+      // }
 
       return {
         section: allPlaces[0].section,
