@@ -11,7 +11,7 @@ const iphone13 = devices["iPhone 13"];
 const COOKIES_FILE = "cookies.json";
 const CONFIG = {
   COOKIE_REFRESH_INTERVAL: 45 * 60 * 1000, // 45 minutes
-  PAGE_TIMEOUT: 60000, // 60 seconds for page operations
+  PAGE_TIMEOUT: 90000, // 90 seconds for page operations
   MAX_RETRIES: 3, // Reduced from 5 to fail faster
   RETRY_DELAY: 8000, // Reduced from 10s to 8s
   CHALLENGE_TIMEOUT: 15000, // 15 seconds for challenge handling
@@ -687,7 +687,12 @@ async function refreshCookies(eventId, proxy = null) {
       console.error(`Cookie refresh attempt ${retryCount + 1} failed: ${error.message}`);
       
       // Check if this was a timeout error
-      const isTimeout = error.message.includes('timeout');
+      const errorMessage = (error && error.message ? String(error.message) : '').toLowerCase();
+      const isTimeout =
+        errorMessage.includes('timeout') ||
+        errorMessage.includes('timed_out') ||
+        errorMessage.includes('net::err_timed_out') ||
+        (error && error.name === 'TimeoutError');
       
       if (isTimeout && retryCount < CONFIG.MAX_REFRESH_RETRIES) {
         console.log(`Cookie refresh timed out, will retry with new proxy and event ID`);

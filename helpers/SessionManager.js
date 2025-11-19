@@ -3,7 +3,7 @@ const require = createRequire(import.meta.url);
 const fs = require("fs");
 const path = require("path");
 import moment from "moment";
-import { setTimeout } from "timers/promises";
+import { setTimeout as setTimeoutPromise } from "timers/promises";
 import { BrowserFingerprint } from '../browserFingerprint.js';
 import { refreshHeaders } from "../scraper.js";
 
@@ -184,7 +184,7 @@ export class SessionManager {
         this.logger?.logWithTime(`Session ${sessionData.sessionId} warmed up successfully`, "debug");
       }
       
-      await setTimeout(this.SESSION_CONFIG.SESSION_WARMUP_TIME);
+      await setTimeoutPromise(this.SESSION_CONFIG.SESSION_WARMUP_TIME);
       return isValid;
     } catch (error) {
       this.logger?.logWithTime(`Failed to warm up session ${sessionData.sessionId}: ${error.message}`, "warning");
@@ -349,7 +349,7 @@ export class SessionManager {
       }
       
       // Clean up old sessions after a delay
-      setTimeout(() => {
+      global.setTimeout(() => {
         for (const sessionId of activeSessionIds) {
           this.sessions.delete(sessionId);
         }
@@ -405,7 +405,7 @@ export class SessionManager {
       oldSession.isRotating = true;
       oldSession.rotationStarted = Date.now();
       
-      setTimeout(() => {
+      global.setTimeout(() => {
         this.sessions.delete(sessionId);
         this.logger?.logWithTime(`Gracefully removed old session ${sessionId}`, 'info');
       }, 60000); // 1 minute overlap

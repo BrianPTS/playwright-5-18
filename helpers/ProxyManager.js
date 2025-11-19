@@ -205,7 +205,13 @@ class ProxyManager {
       const proxyURl = `http://${proxy.username}:${proxy.password}@${
         proxyUrl.hostname
       }:${proxyUrl.port || 80}`;
-      const proxyAgent = new HttpsProxyAgent(proxyURl);
+      const proxyAgent = new HttpsProxyAgent(proxyURl, {
+        timeout: 30000,        // 30s connection timeout
+        keepAlive: true,       // Reuse connections
+        keepAliveMsecs: 1000,  // Keep alive interval
+        maxSockets: 256,       // Allow more concurrent connections
+        maxFreeSockets: 256    // Keep more connections open
+      });
       return { proxyAgent, proxy };
     } catch (error) {
       this.log(`Invalid proxy URL format: ${error.message}`, "error");

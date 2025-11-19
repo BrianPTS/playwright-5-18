@@ -679,7 +679,7 @@ export class ScraperManager {
         }
 
         // Second attempt: Get a random proxy for refreshing headers
-        const { proxy: cookieProxy } =
+        const cookieProxy =
           this.proxyManager.getProxyForEvent(eventToUse);
 
         // Try to refresh headers with the proxy (now includes retry mechanism)
@@ -687,7 +687,7 @@ export class ScraperManager {
         try {
           this.logWithTime(
             `Attempting cookie refresh for ${eventToUse} with proxy ${
-              cookieProxy ? cookieProxy.host + ":" + cookieProxy.port : "none"
+              cookieProxy ? cookieProxy.proxy : "none"
             }`,
             "info"
           );

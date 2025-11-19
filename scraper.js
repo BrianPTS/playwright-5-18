@@ -97,7 +97,7 @@ const iphone13 = devices["iPhone 13"];
 const COOKIES_FILE = "cookies.json";
 const CONFIG = {
   COOKIE_REFRESH_INTERVAL: 24 * 60 * 60 * 1000, // 24 hours
-  PAGE_TIMEOUT: 60000, // 60 seconds for page operations
+  PAGE_TIMEOUT: 90000, // 90 seconds for page operations (aligned with browser-cookies.js)
   CHALLENGE_TIMEOUT: 15000, // 15 seconds for challenge handling
 };
 
@@ -316,18 +316,37 @@ async function refreshHeaders(eventId, proxy, existingCookies = null) {
     );
     return new Promise((resolve, reject) => {
       // Add a timeout to prevent requests from getting stuck in the queue forever
-      const timeoutId = setTimeout(() => {
+      const timeoutId = setTimeout(async () => {
         // Find and remove this request from the queue
         const index = cookieManager.cookieRefreshQueue.findIndex(item => item.timeoutId === timeoutId);
         if (index !== -1) {
           cookieManager.cookieRefreshQueue.splice(index, 1);
         }
         
+        // Try to load existing cookies from file as fallback
+        let fallbackCookies = null;
+        try {
+          const existingCookies = await loadCookiesFromFile();
+          if (existingCookies && existingCookies.length > 0) {
+            // Check if cookies are not too old (within 2 hours)
+            const cookieAge = existingCookies[0]?.expiry ? 
+              (Date.now() - (existingCookies[0].expiry * 1000 - 7 * 24 * 60 * 60 * 1000)) : 
+              Date.now();
+            
+            if (cookieAge < 2 * 60 * 60 * 1000) { // Less than 2 hours old
+              fallbackCookies = existingCookies;
+              console.log(`Using ${fallbackCookies.length} existing cookies as fallback for ${eventId}`);
+            }
+          }
+        } catch (error) {
+          console.warn(`Failed to load fallback cookies: ${error.message}`);
+        }
+        
         // Generate fallback headers since we timed out waiting
         console.log(`Queue timeout for event ${eventId}, using fallback headers`);
         const fallbackHeaders = generateFallbackHeaders();
         resolve({
-          cookies: null,
+          cookies: fallbackCookies,
           fingerprint: BrowserFingerprint.generate(),
           lastRefresh: Date.now(),
           headers: fallbackHeaders,
@@ -336,7 +355,7 @@ async function refreshHeaders(eventId, proxy, existingCookies = null) {
       }, 20000); // Reduced to 20s to fail faster
       
       // Limit queue size to prevent memory issues
-      if (cookieManager.cookieRefreshQueue.length >= 10) {
+      if (cookieManager.cookieRefreshQueue.length >= 100) {
         console.warn(`Cookie refresh queue is full (${cookieManager.cookieRefreshQueue.length}), dropping oldest request`);
         const oldest = cookieManager.cookieRefreshQueue.shift();
         clearTimeout(oldest.timeoutId);
@@ -519,8 +538,8 @@ const GetData = async (headers, proxyAgent, url, eventId) => {
         modifiedHeaders['Cache-Control'] = 'no-store, no-cache, must-revalidate';
       }
       
-      // Randomly adjust connection setting
-      modifiedHeaders['Connection'] = Math.random() > 0.3 ? 'keep-alive' : 'close';
+      // Prefer keep-alive for better proxy performance
+      modifiedHeaders['Connection'] = Math.random() > 0.9 ? 'close' : 'keep-alive';
       
       const response = await throttledRequest({
         url,
@@ -532,7 +551,9 @@ const GetData = async (headers, proxyAgent, url, eventId) => {
           request: CONFIG.PAGE_TIMEOUT
         },
         retry: {
-          limit: 0 // No retries, fail fast
+          limit: 2, // Allow 2 retries for network issues
+          methods: ['GET', 'POST'],
+          statusCodes: [408, 413, 429, 500, 502, 503, 504, 521, 522, 524]
         },
         throwHttpErrors: false,
         signal: abortController.signal
@@ -541,7 +562,16 @@ const GetData = async (headers, proxyAgent, url, eventId) => {
       clearTimeout(timeout);
       
       if (response.statusCode !== 200) {
-        console.log(`Request failed with status code ${response.statusCode} for ${eventId}`);
+        // Log specific error types for better debugging
+        if (response.statusCode === 407) {
+          console.log(`❌ Proxy Authentication Failed (407) for ${eventId} - proxy credentials may be invalid`);
+        } else if (response.statusCode === 403) {
+          console.log(`❌ Forbidden (403) for ${eventId} - possible rate limiting or IP blocked`);
+        } else if (response.statusCode === 400) {
+          console.log(`❌ Bad Request (400) for ${eventId} - request format issue`);
+        } else {
+          console.log(`❌ Request failed with status code ${response.statusCode} for ${eventId}`);
+        }
         return false;
       }
       
@@ -571,7 +601,13 @@ const GetProxy = async () => {
         if (proxyData) {
           const proxyUrl = new URL(`http://${proxyData.proxy}`);
           const testUrl = `http://${proxyData.username}:${proxyData.password}@${proxyUrl.hostname}:${proxyUrl.port || 80}`;
-          const proxyAgent = new HttpsProxyAgent(testUrl);
+          const proxyAgent = new HttpsProxyAgent(testUrl, {
+            timeout: 30000,        // 30s connection timeout
+            keepAlive: true,       // Reuse connections
+            keepAliveMsecs: 1000,  // Keep alive interval
+            maxSockets: 256,       // Allow more concurrent connections
+            maxFreeSockets: 256    // Keep more connections open
+          });
           return { proxyAgent, proxy: proxyData };
         }
       } catch (error) {
@@ -591,11 +627,15 @@ const GetProxy = async () => {
       }
 
       const proxyUrl = new URL(`http://${selectedProxy.proxy}`);
-      const proxyURl = `http://${selectedProxy.username}:${selectedProxy.password}@${
-        proxyUrl.hostname
-      }:${proxyUrl.port || 80}`;
+      const proxyURl = `http://${selectedProxy.username}:${selectedProxy.password}@${proxyUrl.hostname}:${proxyUrl.port || 80}`;
       
-      const proxyAgent = new HttpsProxyAgent(proxyURl);
+      const proxyAgent = new HttpsProxyAgent(proxyURl, {
+        timeout: 30000,        // 30s connection timeout
+        keepAlive: true,       // Reuse connections
+        keepAliveMsecs: 1000,  // Keep alive interval
+        maxSockets: 256,       // Allow more concurrent connections
+        maxFreeSockets: 256    // Keep more connections open
+      });
       return { proxyAgent, proxy: selectedProxy };
     } catch (error) {
       console.warn(`Failed to get proxy: ${error.message}`);
@@ -605,10 +645,14 @@ const GetProxy = async () => {
     console.warn("Using fallback proxy");
     const fallbackProxy = proxyArray.proxies[0];
     const proxyUrl = new URL(`http://${fallbackProxy.proxy}`);
-    const proxyURl = `http://${fallbackProxy.username}:${fallbackProxy.password}@${
-      proxyUrl.hostname
-    }:${proxyUrl.port || 80}`;
-    const proxyAgent = new HttpsProxyAgent(proxyURl);
+    const proxyURl = `http://${fallbackProxy.username}:${fallbackProxy.password}@${proxyUrl.hostname}:${proxyUrl.port || 80}`;
+    const proxyAgent = new HttpsProxyAgent(proxyURl, {
+      timeout: 30000,        // 30s connection timeout
+      keepAlive: true,       // Reuse connections
+      keepAliveMsecs: 1000,  // Keep alive interval
+      maxSockets: 256,       // Allow more concurrent connections
+      maxFreeSockets: 256    // Keep more connections open
+    });
     return { proxyAgent, proxy: fallbackProxy };
   } catch (error) {
     console.error("Critical error in GetProxy:", error);
