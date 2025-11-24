@@ -46,7 +46,7 @@
     "p-throttle": "^7.0.0",
     "papaparse": "^5.5.2",
     "patchright": "^1.4.4",
-    "pm2": "^5.4.3",
+    "pm2": "^6.0.13",
     "puppeteer": "^24.1.0",
     "puppeteer-extra-plugin-stealth": "^2.11.2",
     "random-useragent": "^0.5.0",

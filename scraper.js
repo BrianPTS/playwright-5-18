@@ -802,17 +802,28 @@ const ScrapeEvent = async (
           throw new Error("Failed to get captured data");
         }
 
-        // Use headers from capturedData if available (fallback mechanism)
-        if (capturedData.headers && !capturedData.cookies) {
-          console.log(`Using fallback headers for event ${eventId}`);
-          return callTicketmasterAPI(
-            capturedData.headers,
-            proxyAgent,
-            eventId,
-            event,
-            0,
-            startTime
+        // **COOKIE REFRESH SUCCESS GUARD**
+        // Check if cookie refresh was successful by validating critical cookies
+        if (capturedData.cookies && capturedData.cookies.length > 0) {
+          // Check for critical tmpt cookie
+          const hasTmptCookie = capturedData.cookies.some(cookie => cookie.name === 'tmpt');
+          const criticalCookies = ['tmpt', 'TMUO', 'TMPS', 'TM_TKTS', 'SESSION'];
+          const foundCriticalCookies = capturedData.cookies.filter(cookie => 
+            criticalCookies.includes(cookie.name)
           );
+          
+          console.log(`✓ Cookie refresh successful for event ${eventId}: ${capturedData.cookies.length} cookies captured`);
+          console.log(`✓ Critical cookies found: ${foundCriticalCookies.map(c => c.name).join(', ')} (tmpt: ${hasTmptCookie ? 'YES' : 'NO'})`);
+          
+          if (!hasTmptCookie) {
+            console.error(`❌ CRITICAL: tmpt cookie missing for event ${eventId}! Cannot proceed without authentication cookies.`);
+            console.error(`Available cookies: ${capturedData.cookies.map(c => c.name).join(', ')}`);
+            throw new Error("Cookie refresh failed: Critical tmpt cookie not found - stopping event processing");
+          }
+        } else {
+          console.error(`❌ Cookie refresh failed for event ${eventId}: No cookies captured - cannot proceed with event scraping`);
+          console.error(`❌ STOPPING EVENT PROCESSING: Valid cookies are required for authentication`);
+          throw new Error("Cookie refresh failed: No valid cookies available - event processing stopped");
         }
 
         if (!capturedData?.cookies?.length) {
