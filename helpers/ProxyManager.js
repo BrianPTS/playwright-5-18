@@ -11,8 +11,8 @@ class ProxyManager {
     this.logger = logger;
     this.proxyUsage = new Map(); // Maps proxy IP to set of eventIds using it
     this.eventToProxy = new Map(); // Maps eventId to assigned proxy
-    this.MAX_EVENTS_PER_PROXY = 2; // Increased from 1 to allow more events per proxy
-    this.BATCH_SIZE = 25; // Significantly increased for maximum batch throughput
+    this.MAX_EVENTS_PER_PROXY = 1; // Increased from 1 to allow more events per proxy
+    this.BATCH_SIZE = 50; // Significantly increased for maximum batch throughput
     this.proxies = [...proxyArray.proxies];
     this.lastAssignedProxyIndex = -1;
     this.proxyLastUsed = new Map(); // Track when proxies were last used

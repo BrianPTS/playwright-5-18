@@ -2591,19 +2591,19 @@ export class ScraperManager {
       this.eventFailureCount.set(eventId, newFailureCount);
       this.eventLastFailureTime.set(eventId, now);
 
-      // More forgiving failure thresholds
-      const baseDelay = 2000; // Start with 2 seconds
-      const maxDelay = 120000; // Max 2 minutes
+      // FAST FAILURE RECOVERY - Minimal delays for scraping failures
+      const baseDelay = 500; // Start with 0.5 seconds (was 2s)
+      const maxDelay = 5000; // Max 5 seconds (was 2 minutes)
 
-      // Gentler exponential backoff with jitter
+      // Minimal exponential backoff - fail fast, retry fast
       let backoffDelay = Math.min(
         maxDelay,
-        baseDelay * Math.pow(1.4, newFailureCount)
+        baseDelay * Math.pow(1.2, newFailureCount) // Reduced multiplier from 1.4 to 1.2
       );
 
-      // Add random jitter (±30%) to prevent synchronized retries
-      const jitter = backoffDelay * 0.3 * (Math.random() - 0.5);
-      backoffDelay = Math.max(1000, backoffDelay + jitter);
+      // Minimal jitter (±10%) to prevent synchronized retries
+      const jitter = backoffDelay * 0.1 * (Math.random() - 0.5); // Reduced from 30% to 10%
+      backoffDelay = Math.max(200, backoffDelay + jitter); // Minimum 200ms (was 1000ms)
 
       // Reset failure count if it's been a while since last failure
       const lastFailureTime = this.eventLastFailureTime.get(eventId) || 0;

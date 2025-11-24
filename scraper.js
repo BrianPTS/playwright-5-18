@@ -1015,7 +1015,7 @@ async function callTicketmasterAPI(facetHeader, proxyAgent, eventId, event, mapH
         },
         headers: safeHeaders,
         timeout: {
-          request: 30000
+          request: 10000 // Reduced from 30s to 10s for faster failure
         },
         responseType: 'json',
         retry: {

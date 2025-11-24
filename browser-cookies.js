@@ -695,14 +695,11 @@ async function refreshCookies(eventId, proxy = null) {
         (error && error.name === 'TimeoutError');
       
       if (isTimeout && retryCount < CONFIG.MAX_REFRESH_RETRIES) {
-        console.log(`Cookie refresh timed out, will retry with new proxy and event ID`);
+        console.log(`Cookie refresh timed out, will retry with same event ID but new proxy`);
         
-        // Generate a new event ID for retry (use a different event from the same venue/artist)
-        const newEventId = await generateAlternativeEventId(eventId);
-        if (newEventId && newEventId !== eventId) {
-          console.log(`Using alternative event ID for retry: ${newEventId}`);
-          eventId = newEventId;
-        }
+        // DO NOT generate alternative event IDs - use the original valid event ID
+        // Generating fake event IDs causes navigation failures and invalid URLs
+        console.log(`Keeping original event ID: ${eventId} (valid Ticketmaster event)`);
         
         // Get a new proxy for retry
         if (proxy) {
