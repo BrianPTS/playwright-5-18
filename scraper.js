@@ -1,3 +1,4 @@
+
 import { createRequire } from "module";
 const require = createRequire(import.meta.url);
 import got from 'got';
@@ -1015,7 +1016,7 @@ async function callTicketmasterAPI(facetHeader, proxyAgent, eventId, event, mapH
         },
         headers: safeHeaders,
         timeout: {
-          request: 10000 // Reduced from 30s to 10s for faster failure
+          request: 15000 // Increased to 25s to prevent incomplete responses
         },
         responseType: 'json',
         retry: {
@@ -1082,37 +1083,43 @@ async function callTicketmasterAPI(facetHeader, proxyAgent, eventId, event, mapH
       DataFacets = null;
     }
     
-    if (!DataFacets && !DataMap) {
-      throw new Error('Both API calls failed - no data available');
+    // Both APIs must succeed to ensure data consistency
+    if (!DataFacets || !DataMap) {
+      const failedApis = [];
+      if (!DataFacets) failedApis.push('Facet API');
+      if (!DataMap) failedApis.push('Map API');
+      
+      throw new Error(`Event scraping failed - ${failedApis.join(' and ')} call(s) failed. Both APIs are required for data consistency.`);
     }
     
-    // Allow processing to continue even if one API call failed
-    if (!DataFacets) {
-      console.log(`Processing event ${eventId} with map data only`);
-    }
-    
-    if (!DataMap) {
-      console.log(`Processing event ${eventId} with facet data only`);
-    }
-    
+    console.log(`Both APIs successful for event ${eventId} - proceeding with data processing`);
+
     console.log(`API requests completed for event ${eventId} in ${Date.now() - startTime}ms`);
-    
+
     // Handle the case where we have partial data
     try {
-      return AttachRowSection(
+      const result = AttachRowSection(
         DataFacets ? GenerateNanoPlaces(DataFacets?.facets) : [],
         DataMap || {},
         DataFacets?._embedded?.offer || [],
         { eventId, inHandDate: event?.inHandDate },
         DataFacets?._embedded?.description || {}
       );
+      
+      // Validate result - null or empty results should not be considered successful scrape
+      if (!result || !Array.isArray(result) || result.length === 0) {
+        throw new Error(`Event ${eventId} scrape validation failed - no valid seats found. Result: ${result ? 'empty array' : 'null/undefined'}`);
+      }
+      
+      console.log(`Event ${eventId} scrape successful - ${result.length} seat groups found`);
+      return result;
     } catch (processError) {
       console.error(`Error processing API response for event ${eventId}:`, processError.message);
-      return null;
+      throw processError; // Re-throw to ensure scrape is marked as failed
     }
   } catch (error) {
     console.error(`API error for event ${eventId}:`, error.message);
-    return null;
+    throw error; // Re-throw to ensure scrape is marked as failed instead of returning null
   }
 }
 

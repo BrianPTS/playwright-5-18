@@ -963,6 +963,11 @@ export class ScraperManager {
         throw new Error(`Event ${eventId} is missing required mapping_id`);
       }
 
+      // Validate scrapeResult - null or empty data should not be considered success
+      if (!scrapeResult || !Array.isArray(scrapeResult) || scrapeResult.length === 0) {
+        throw new Error(`Event ${eventId} scrape failed - no valid data returned. Scrape result: ${scrapeResult ? 'empty array' : 'null/undefined'}`);
+      }
+
       // Initialize variables for database operations tracking
       let rowsToDelete = [];
       let rowsToInsert = [];
@@ -977,6 +982,12 @@ export class ScraperManager {
           group.inventory &&
           group.inventory.quantity > 1
       );
+      
+      // If all data was filtered out, this indicates a data quality issue, not an empty event
+      if (validScrapeResult.length === 0) {
+        throw new Error(`Event ${eventId} scrape validation failed - all ${scrapeResult.length} groups filtered out due to invalid structure or single seats`);
+      }
+      
       // const result = JSON.stringify(validScrapeResult);
 
       // fs.writeFileSync("debug/validScrapeResult.json", result);
@@ -1553,76 +1564,6 @@ export class ScraperManager {
           if (LOG_LEVEL >= 3) {
             this.logWithTime(
               `[Debug SM ${eventId}] NO CHANGES: No database operations needed - ${unchangedRows} rows remain unchanged, 0 deletes, 0 updates, 0 inserts`,
-              "debug"
-            );
-          }
-        }
-      } else if (validScrapeResult?.length === 0) {
-          // Handle case where scrape result is empty: delete all existing groups for this eventId
-          const existingGroupCount = await ConsecutiveGroup.countDocuments({
-            eventId,
-          }).session(session).read('primary'); // Force read from primary for fresh data
-        if (existingGroupCount > 0) {
-          if (LOG_LEVEL >= 2) {
-            this.logWithTime(
-              `[Info SM ${eventId}] No valid groups in scrape result. Deleting ${existingGroupCount} existing consecutive groups.`,
-              "info"
-            );
-          }
-          if (LOG_LEVEL >= 3) {
-            this.logWithTime(
-              `[Debug SM ${eventId}] EMPTY SCRAPE RESULT: Performing bulk delete of all ${existingGroupCount} existing rows`,
-              "debug"
-            );
-          }
-          
-          // First, get inventory IDs for external API deletion
-          const allGroupsToDelete = await ConsecutiveGroup.find(
-            { eventId },
-            { 'inventory.inventoryId': 1 }
-          ).session(session);
-          
-          const allInventoryIdsToDelete = allGroupsToDelete
-            .map(group => group.inventory?.inventoryId)
-            .filter(id => id) // Filter out null/undefined IDs
-            .map(id => String(id)); // Convert to strings for API
-
-          // Delete from database first
-          await ConsecutiveGroup.deleteMany({ eventId }).session(session);
-          
-          // Then delete from external API if we have inventory IDs
-          if (allInventoryIdsToDelete.length > 0) {
-            try {
-              const apiBulkDeleteResult = await this.inventoryApi.deleteInventoryBatch(allInventoryIdsToDelete);
-              if (LOG_LEVEL >= 3) {
-                this.logWithTime(
-                  `[Debug SM ${eventId}] External API bulk deletion: ${apiBulkDeleteResult.successful.length} successful, ${apiBulkDeleteResult.failed.length} failed`,
-                  "debug"
-                );
-              }
-              console.log(`[API BULK DELETE ${eventId}] External API: ${apiBulkDeleteResult.successful.length} successful, ${apiBulkDeleteResult.failed.length} failed`);
-            } catch (apiBulkError) {
-              console.error(`[API BULK DELETE ERROR ${eventId}] Failed to delete inventories via API:`, apiBulkError.message);
-              if (LOG_LEVEL >= 1) {
-                this.logWithTime(
-                  `[Warning SM ${eventId}] External API bulk deletion failed: ${apiBulkError.message}`,
-                  "warning"
-                );
-              }
-            }
-          }
-          
-          if (LOG_LEVEL >= 3) {
-            this.logWithTime(
-              `[Debug SM ${eventId}] BULK DELETE operation completed: ${existingGroupCount} rows removed due to empty scrape result`,
-              "debug"
-            );
-          }
-          console.log(`[DB BULK DELETE ${eventId}] Removed ${existingGroupCount} existing groups due to empty scrape result`);
-        } else {
-          if (LOG_LEVEL >= 3) {
-            this.logWithTime(
-              `[Debug SM ${eventId}] EMPTY SCRAPE RESULT: No existing groups to delete - database already clean`,
               "debug"
             );
           }
