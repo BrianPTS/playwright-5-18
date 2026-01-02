@@ -11,8 +11,8 @@ const iphone13 = devices["iPhone 13"];
 const COOKIES_FILE = "cookies.json";
 const CONFIG = {
   COOKIE_REFRESH_INTERVAL: 45 * 60 * 1000, // 45 minutes
-  PAGE_TIMEOUT: 60000, // 60 seconds for page operations
-  MAX_RETRIES: 3, // Reduced from 5 to fail faster
+  PAGE_TIMEOUT: 90000, // 60 seconds for page operations
+  MAX_RETRIES: 5, // Reduced from 5 to fail faster
   RETRY_DELAY: 8000, // Reduced from 10s to 8s
   CHALLENGE_TIMEOUT: 15000, // 15 seconds for challenge handling
   COOKIE_REFRESH_TIMEOUT: 2 * 60 * 1000, // 2 minutes timeout for cookie refresh
@@ -152,7 +152,7 @@ async function initBrowser(proxy) {
     
     // For persisting browser sessions, use same browser if possible
     if (!browser || !browser.isConnected()) {
-      // Launch options
+      // Launch options with enhanced stealth
       const launchOptions = {
         headless: true,
         args: [
@@ -166,9 +166,23 @@ async function initBrowser(proxy) {
           '--disable-infobars',
           '--disable-notifications',
           '--disable-dev-shm-usage',
-          '--disable-gpu'
+          '--disable-gpu',
+          '--disable-background-timer-throttling',
+          '--disable-backgrounding-occluded-windows',
+          '--disable-renderer-backgrounding',
+          '--disable-features=TranslateUI',
+          '--disable-ipc-flooding-protection',
+          '--enable-features=NetworkService,NetworkServiceInProcess',
+          '--force-color-profile=srgb',
+          '--metrics-recording-only',
+          '--mute-audio',
+          '--disable-hang-monitor',
+          '--disable-prompt-on-repost',
+          '--disable-sync',
+          '--password-store=basic',
+          '--use-mock-keychain'
         ],
-        timeout: 60000,
+        timeout: 90000,
       };
 
       if (proxy && typeof proxy === 'object' && proxy.proxy) {
@@ -205,7 +219,7 @@ async function initBrowser(proxy) {
             browser = await chromium.launch(launchOptions);
     }
     
-    // Create new context with enhanced fingerprinting
+    // Create new context with enhanced fingerprinting and stealth
     context = await browser.newContext({
       ...iphone13,
       userAgent: getRealisticIphoneUserAgent(),
@@ -240,7 +254,7 @@ async function initBrowser(proxy) {
         "Sec-Fetch-User": "?1",
         "DNT": Math.random() > 0.5 ? "1" : "0",
         "Upgrade-Insecure-Requests": "1",
-        "Pragma": "no-cache"
+        "Cache-Control": "max-age=0"
       },
       viewport: {
         width: [375, 390, 414][Math.floor(Math.random() * 3)],
@@ -248,9 +262,82 @@ async function initBrowser(proxy) {
       }
     });
     
+    // Add stealth scripts to mask automation (Patchright compatible)
+    await context.addInitScript(() => {
+      // Override navigator.webdriver
+      Object.defineProperty(navigator, 'webdriver', {
+        get: () => undefined
+      });
+      
+      // Remove automation indicators
+      try {
+        delete navigator.__proto__.webdriver;
+      } catch (e) {}
+      
+      // Override plugins to look real
+      Object.defineProperty(navigator, 'plugins', {
+        get: () => [1, 2, 3, 4, 5]
+      });
+      
+      // Override languages
+      Object.defineProperty(navigator, 'languages', {
+        get: () => ['en-US', 'en']
+      });
+      
+      // Mock chrome object
+      window.chrome = {
+        runtime: {},
+        loadTimes: function() {},
+        csi: function() {},
+        app: {}
+      };
+      
+      // Override permissions
+      const originalQuery = window.navigator.permissions.query;
+      window.navigator.permissions.query = (parameters) => (
+        parameters.name === 'notifications' ?
+          Promise.resolve({ state: Notification.permission }) :
+          originalQuery(parameters)
+      );
+      
+      // Add realistic connection info
+      Object.defineProperty(navigator, 'connection', {
+        get: () => ({
+          effectiveType: '4g',
+          rtt: 50,
+          downlink: 10,
+          saveData: false
+        })
+      });
+      
+      // Mock battery API
+      Object.defineProperty(navigator, 'getBattery', {
+        get: () => async () => ({
+          charging: Math.random() > 0.5,
+          chargingTime: 0,
+          dischargingTime: Infinity,
+          level: 0.5 + Math.random() * 0.5
+        })
+      });
+      
+      // Mock touch events for mobile
+      window.ontouchstart = null;
+      document.ontouchstart = null;
+      
+      // Add realistic screen properties
+      Object.defineProperty(screen, 'availWidth', { get: () => window.innerWidth });
+      Object.defineProperty(screen, 'availHeight', { get: () => window.innerHeight });
+    });
+    
     // Create a new page and simulate human behavior
     const page = await context.newPage();
-    await page.waitForTimeout(1000 + Math.random() * 2000);
+    
+    // Set realistic page load timeout
+    page.setDefaultTimeout(CONFIG.PAGE_TIMEOUT);
+    page.setDefaultNavigationTimeout(CONFIG.PAGE_TIMEOUT);
+    
+    // Human-like delay before any action
+    await page.waitForTimeout(1500 + Math.random() * 2500);
     await simulateMobileInteractions(page);
     
     return { context, fingerprint: enhancedFingerprint(), page, browser };
@@ -262,83 +349,42 @@ async function initBrowser(proxy) {
     
     throw error;
   }
-}
+} // Added missing closing bracket for initBrowser function
 
 /**
  * Handle Ticketmaster challenge pages (CAPTCHA, etc.)
  */
 async function handleTicketmasterChallenge(page) {
-  const startTime = Date.now();
-
   try {
     const challengePresent = await page.evaluate(() => {
-      return document.body.textContent.includes(
-        "Your Browsing Activity Has Been Paused"
-      );
-    }).catch(() => false); // Catch any navigation errors
+      const bodyText = document.body.textContent || '';
+      const titleText = document.title || '';
+      
+      // Check for various challenge indicators
+      return bodyText.includes("Your Browsing Activity Has Been Paused") ||
+             bodyText.includes("Access Denied") ||
+             bodyText.includes("Security Check") ||
+             bodyText.includes("Please verify you are a human") ||
+             titleText.includes("Access Denied") ||
+             titleText.includes("Just a moment") ||
+             document.querySelector('#px-captcha') !== null ||
+             document.querySelector('.g-recaptcha') !== null;
+    }).catch(() => false);
 
     if (challengePresent) {
-      console.log("Detected Ticketmaster challenge, attempting resolution...");
-      await page.waitForTimeout(1000 + Math.random() * 1000);
-
-      try {
-        const viewportSize = page.viewportSize();
-        if (viewportSize) {
-          await page.mouse.move(
-            Math.floor(Math.random() * viewportSize.width),
-            Math.floor(Math.random() * viewportSize.height),
-            { steps: 5 }
-          );
-        }
-      } catch (moveError) {
-        console.warn("Mouse movement error in challenge, continuing:", moveError.message);
-      }
-
-      const buttons = await page.$$("button").catch(() => []);
-      let buttonClicked = false;
-
-      for (const button of buttons) {
-        if (Date.now() - startTime > CONFIG.CHALLENGE_TIMEOUT) {
-          console.warn("Challenge timeout, continuing without resolution");
-          return false;
-        }
-
-        try {
-          const text = await button.textContent();
-          if (
-            text?.toLowerCase().includes("continue") ||
-            text?.toLowerCase().includes("verify")
-          ) {
-            await button.click();
-            buttonClicked = true;
-            break;
-          }
-        } catch (buttonError) {
-          console.warn("Button click error, continuing:", buttonError.message);
-          continue;
-        }
-      }
-
-      if (!buttonClicked) {
-        console.warn("Could not find challenge button, continuing without resolution");
-        return false;
-      }
-
-      await page.waitForTimeout(2000);
-      const stillChallenged = await page.evaluate(() => {
-        return document.body.textContent.includes(
-          "Your Browsing Activity Has Been Paused"
-        );
-      }).catch(() => false);
-
-      if (stillChallenged) {
-        console.warn("Challenge not resolved, continuing without resolution");
-        return false;
-      }
+      console.log(" CHALLENGE DETECTED: Bot detection triggered - aborting this session");
+      console.log(" This proxy/session is compromised. Will request new proxy for retry.");
+      
+      // Throw error to trigger proxy rotation
+      throw new Error("CHALLENGE_DETECTED_ABORT_SESSION");
     }
+    
     return true;
   } catch (error) {
-    console.warn("Challenge handling failed, continuing:", error.message);
+    if (error.message === "CHALLENGE_DETECTED_ABORT_SESSION") {
+      throw error; // Re-throw to propagate up
+    }
+    console.warn("Challenge check failed:", error.message);
     return false;
   }
 }

@@ -2861,6 +2861,10 @@ export class ScraperManager {
         }
       }
 
+      if (!proxy) {
+        throw new Error("Failed to obtain proxy after multiple attempts");
+      }
+
       // Get headers with natural retry behavior
       let headers = null;
       let headerAttempts = 0;
@@ -3724,12 +3728,14 @@ export class ScraperManager {
                 // Just get a new proxy - no blocking
                 try {
                   this.proxyManager.releaseProxy(eventId, false);
-                  const { proxyAgent, proxy } =
-                    this.proxyManager.getProxyForEvent(eventId);
-                  this.logWithTime(
-                    `Using new proxy for ${eventId} during recovery`,
-                    "info"
-                  );
+                  const proxyData = this.proxyManager.getProxyForEvent(eventId);
+                  if (proxyData) {
+                    const { proxyAgent, proxy } = this.proxyManager.createProxyAgent(proxyData);
+                    this.logWithTime(
+                      `Using new proxy for ${eventId} during recovery: ${proxy?.proxy || 'unknown'}`,
+                      "info"
+                    );
+                  }
                 } catch (proxyError) {
                   this.logWithTime(
                     `Error getting new proxy: ${proxyError.message}`,

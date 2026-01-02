@@ -288,6 +288,11 @@ async function getCapturedData(eventId, proxy, forceRefresh = false) {
     forceRefresh;
 
   if (needsRefresh) {
+    // Validate that we have a proxy before attempting cookie refresh
+    if (!proxy || !proxy.proxy) {
+      throw new Error("Cannot refresh cookies without a valid proxy");
+    }
+
     const jitter = Math.random() * 20000 + 10000; // 10s to 30s
 
     const effectiveInterval = CookieManager.CONFIG.COOKIE_REFRESH_INTERVAL + jitter;
@@ -370,42 +375,23 @@ async function refreshHeaders(eventId, proxy, existingCookies = null) {
   let proxyToUse = proxy;
   let eventIdToUse = eventId;
 
+  let globalTimeoutId = null;
+  
   try {
     cookieManager.isRefreshingCookies = true;
     
-    // Set up a cleanup function to ensure we always reset the flag and process the queue
-    const cleanupRefreshProcess = async (error = null) => {
+    // Add a global timeout for the entire refresh process
+    globalTimeoutId = setTimeout(() => {
+      console.error(`Global timeout reached when refreshing cookies for event ${eventIdToUse}`);
       cookieManager.isRefreshingCookies = false;
       
-      // Process any queued refresh requests
+      // Reject all queued requests on timeout
       while (cookieManager.cookieRefreshQueue.length > 0) {
-        const { resolve, reject, timeoutId } = cookieManager.cookieRefreshQueue.shift();
-        clearTimeout(timeoutId); // Clear the timeout for this request
-        
-        if (error) {
-          reject(error);
-        } else if (cookieManager.capturedState.cookies || cookieManager.capturedState.headers) {
-          resolve(cookieManager.capturedState);
-        } else {
-          // If we don't have cookies or headers, use fallback headers
-          const fallbackHeaders = generateFallbackHeaders();
-          const fallbackState = {
-            cookies: null,
-            fingerprint: BrowserFingerprint.generate(),
-            lastRefresh: Date.now(),
-            headers: fallbackHeaders,
-            proxy: proxyToUse
-          };
-          resolve(fallbackState);
-        }
+        const { reject, timeoutId } = cookieManager.cookieRefreshQueue.shift();
+        clearTimeout(timeoutId);
+        reject(new Error("Global timeout for cookie refresh"));
       }
-    };
-    
-    // Add a global timeout for the entire refresh process
-    const globalTimeoutId = setTimeout(() => {
-      console.error(`Global timeout reached when refreshing cookies for event ${eventIdToUse}`);
-      cleanupRefreshProcess(new Error("Global timeout for cookie refresh"));
-    }, 90000); // 90 second timeout for the entire process (increased from 60s)
+    }, 90000); // 90 second timeout for the entire process
 
     // Check if we have valid cookies in memory first
     if (
@@ -414,8 +400,6 @@ async function refreshHeaders(eventId, proxy, existingCookies = null) {
       Date.now() - cookieManager.capturedState.lastRefresh <= COOKIE_MANAGEMENT.COOKIE_REFRESH_INTERVAL
     ) {
       console.log("Using existing cookies from memory");
-      clearTimeout(globalTimeoutId);
-      await cleanupRefreshProcess();
       return cookieManager.capturedState;
     }
 
@@ -434,8 +418,6 @@ async function refreshHeaders(eventId, proxy, existingCookies = null) {
         proxy: cookieManager.capturedState.proxy || proxyToUse,
       };
       
-      clearTimeout(globalTimeoutId);
-      await cleanupRefreshProcess();
       return cookieManager.capturedState;
     }
 
@@ -454,8 +436,6 @@ async function refreshHeaders(eventId, proxy, existingCookies = null) {
           proxy: cookieManager.capturedState.proxy || proxyToUse,
         };
         
-        clearTimeout(globalTimeoutId);
-        await cleanupRefreshProcess();
         return cookieManager.capturedState;
       } else {
         console.error("Failed to get cookies from refreshCookies");
@@ -474,24 +454,38 @@ async function refreshHeaders(eventId, proxy, existingCookies = null) {
         proxy: cookieManager.capturedState.proxy || proxyToUse
       };
       
-      clearTimeout(globalTimeoutId);
-      await cleanupRefreshProcess();
       return cookieManager.capturedState;
     }
   } catch (error) {
     console.error("Error in refreshHeaders:", error);
-    
-    // Reset the flag to allow new requests
-    cookieManager.isRefreshingCookies = false;
-    
-    // In case of error, reject all queued requests
-    while (cookieManager.cookieRefreshQueue.length > 0) {
-      const { reject, timeoutId } = cookieManager.cookieRefreshQueue.shift();
-      clearTimeout(timeoutId); // Clear the timeout
-      reject(error);
+    throw error;
+  } finally {
+    // ALWAYS reset the flag and clear timeout, no matter what happens
+    if (globalTimeoutId) {
+      clearTimeout(globalTimeoutId);
     }
     
-    throw error;
+    cookieManager.isRefreshingCookies = false;
+    
+    // Process any queued refresh requests
+    while (cookieManager.cookieRefreshQueue.length > 0) {
+      const { resolve, reject, timeoutId } = cookieManager.cookieRefreshQueue.shift();
+      clearTimeout(timeoutId);
+      
+      // Resolve with current state or reject if we have no cookies
+      if (cookieManager.capturedState.cookies || cookieManager.capturedState.headers) {
+        resolve(cookieManager.capturedState);
+      } else {
+        const fallbackHeaders = generateFallbackHeaders();
+        resolve({
+          cookies: null,
+          fingerprint: BrowserFingerprint.generate(),
+          lastRefresh: Date.now(),
+          headers: fallbackHeaders,
+          proxy: proxyToUse
+        });
+      }
+    }
   }
 }
 
@@ -666,6 +660,10 @@ const ScrapeEvent = async (
   externalProxyAgent = null,
   externalProxy = null
 ) => {
+  // Declare proxy variables at function level so they're accessible in catch block
+  let proxyAgent = externalProxyAgent;
+  let proxy = externalProxy;
+
   try {
     // Check memory usage at the start
     const memUsage = process.memoryUsage();
@@ -682,8 +680,6 @@ const ScrapeEvent = async (
     const eventId = event?.eventId || event;
     const startTime = Date.now();
     const correlationId = generateCorrelationId();
-    let proxyAgent = externalProxyAgent;
-    let proxy = externalProxy;
     let cookieString, userAgent, fingerprint;
     let useProvidedHeaders = false;
 
