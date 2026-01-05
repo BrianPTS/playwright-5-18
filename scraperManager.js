@@ -2994,6 +2994,28 @@ export class ScraperManager {
     } catch (error) {
       // Enhanced error handling with context
       const processingTime = Date.now() - startTime;
+      
+      // Check if this is a seat count fluctuation error
+      if (error.isFluctuationError) {
+        const trendInfo = error.trendCheck ? ` (${error.trendCheck})` : '';
+        this.logWithTime(
+          `⚠️ Seat count fluctuation detected for ${eventId}: ${error.previousCount} → ${error.seatCount} seats${trendInfo}. Delaying for 30s`,
+          "warning"
+        );
+        
+        // Add event to cooldown with the delay time
+        const delayUntil = error.delayUntil || (Date.now() + 30000);
+        this.cooldownEvents.set(eventId, delayUntil);
+        
+        // Release proxy but don't mark as failed
+        if (proxy) {
+          this.proxyManager.releaseProxy(eventId, true); // Mark as success to not penalize proxy
+        }
+        
+        // Return false to retry later, but don't count as a failure
+        return false;
+      }
+      
       this.logWithTime(
         `❌ Natural processing failed for ${eventId} after ${processingTime}ms: ${error.message}`,
         "error"

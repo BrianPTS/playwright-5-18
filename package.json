@@ -45,7 +45,7 @@
     "p-retry": "^6.2.1",
     "p-throttle": "^7.0.0",
     "papaparse": "^5.5.2",
-    "patchright": "^1.4.4",
+    "patchright": "^1.57.0",
     "pm2": "^6.0.13",
     "puppeteer": "^24.1.0",
     "puppeteer-extra-plugin-stealth": "^2.11.2",

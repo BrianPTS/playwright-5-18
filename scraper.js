@@ -17,6 +17,7 @@ import delay from 'delay-async';
 import { CookieManager } from './helpers/CookieManager.js';
 import scraperManager from './scraperManager.js';
 import CookieRefreshTracker from './helpers/CookieRefreshTracker.js';
+import seatValidator from './helpers/SeatCountValidator.js';
 // Import functions from browser-cookies.js
 import {
   refreshCookies,
@@ -1107,7 +1108,30 @@ async function callTicketmasterAPI(facetHeader, proxyAgent, eventId, event, mapH
         throw new Error(`Event ${eventId} scrape validation failed - no valid seats found. Result: ${result ? 'empty array' : 'null/undefined'}`);
       }
       
-      console.log(`Event ${eventId} scrape successful - ${result.length} seat groups found`);
+      // SEAT COUNT VALIDATION - Check for suspicious fluctuations
+      const seatCount = result.length;
+      const validation = await seatValidator.validateSeatCount(eventId, seatCount);
+      
+      if (!validation.isValid && validation.shouldDelay) {
+        console.warn(
+          `[SeatValidator] ⚠️ ${validation.message} - Event ${eventId} will be delayed`
+        );
+        
+        // Throw a special error that scraperManager can catch and handle
+        const delayError = new Error(`SEAT_COUNT_FLUCTUATION: ${validation.message}`);
+        delayError.isFluctuationError = true;
+        delayError.delayUntil = validation.delayUntil;
+        delayError.seatCount = seatCount;
+        delayError.previousCount = validation.previousCount;
+        delayError.trendCheck = validation.trendCheck || null;
+        throw delayError;
+      }
+      
+      console.log(
+        `Event ${eventId} scrape successful - ${seatCount} seat groups found ` +
+        `(validation: ${validation.reason}, fluctuation: ${validation.fluctuationPercent || 0}%)`
+      );
+      
       return result;
     } catch (processError) {
       console.error(`Error processing API response for event ${eventId}:`, processError.message);
