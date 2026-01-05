@@ -13,7 +13,7 @@ import crypto from 'crypto';
 
 class SeatCountValidator {
   constructor(options = {}) {
-    this.FLUCTUATION_THRESHOLD = options.fluctuationThreshold || 0.5; // 50% drop triggers validation
+    this.FLUCTUATION_THRESHOLD = options.fluctuationThreshold || 0.3; // 30% drop triggers validation
     this.MIN_SEATS_FOR_VALIDATION = options.minSeatsForValidation || 10; // Only validate if previous count >= 10
     this.DELAY_DURATION = options.delayDuration || 30000; // 30 seconds delay
     this.MAX_HISTORY_AGE = options.maxHistoryAge || 24 * 60 * 60 * 1000; // 24 hours
@@ -481,7 +481,7 @@ class SeatCountValidator {
 
 // Create singleton instance
 const seatValidator = new SeatCountValidator({
-  fluctuationThreshold: 0.5,  // 50% drop triggers validation
+  fluctuationThreshold: 0.3,  // 30% drop triggers validation
   minSeatsForValidation: 10,   // Only validate if previous count >= 10
   delayDuration: 30000,        // 30 seconds delay
   maxHistoryAge: 24 * 60 * 60 * 1000, // 24 hours
