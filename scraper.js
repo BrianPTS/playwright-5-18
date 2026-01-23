@@ -5,7 +5,7 @@ import got from 'got';
 const { HttpsProxyAgent } = require("https-proxy-agent");
 const fs = require("fs");
 import { devices } from "patchright";
-import proxyArray from "./helpers/proxy.js";
+// Removed old proxy import - now using database
 import { AttachRowSection } from "./helpers/seatBatch.js";
 import GenerateNanoPlaces from "./helpers/seats.js";
 import crypto from "crypto";
@@ -14,15 +14,22 @@ import pThrottle from 'p-throttle';
 import randomUseragent from 'random-useragent';
 import delay from 'delay-async';
 
+import { CookieService } from './src/core/services/CookieService.js';
+import { BrowserService } from './src/core/services/BrowserService.js';
 import { CookieManager } from './helpers/CookieManager.js';
 import scraperManager from './scraperManager.js';
 import CookieRefreshTracker from './helpers/CookieRefreshTracker.js';
 import seatValidator from './helpers/SeatCountValidator.js';
-// Import functions from browser-cookies.js
+// Import Event model for cookie refresh
+import { Event } from './models/index.js';
+// Import functions from browser-cookies.js for legacy compatibility
 import {
   refreshCookies,
   loadCookiesFromFile,
-  getRealisticIphoneUserAgent} from './browser-cookies.js';
+  getRealisticIphoneUserAgent,
+  browserService,
+  cookieService
+} from './browser-cookies.js';
 
 // Circuit breaker for cookie refresh operations
 class CookieRefreshCircuitBreaker {
@@ -97,10 +104,11 @@ cookieManager.persistedContext = null;
 const iphone13 = devices["iPhone 13"];
 
 const COOKIES_FILE = "cookies.json";
+// Use configurations from modular services
 const CONFIG = {
-  COOKIE_REFRESH_INTERVAL: 24 * 60 * 60 * 1000, // 24 hours
-  PAGE_TIMEOUT: 90000, // 90 seconds for page operations (aligned with browser-cookies.js)
-  CHALLENGE_TIMEOUT: 15000, // 15 seconds for challenge handling
+  COOKIE_REFRESH_INTERVAL: 24 * 60 * 60 * 1000, // 24 hours for scraper-specific periodic refresh
+  PAGE_TIMEOUT: 90000,
+  CHALLENGE_TIMEOUT: 15000
 };
 
 let browser = null;
@@ -117,84 +125,26 @@ let isRefreshingCookies = false;
 let cookieRefreshQueue = [];
 // Flag to track if periodic refresh has been started
 let isPeriodicRefreshStarted = false;
+// Flag to force fresh cookies on startup (skip loading from file)
+let isStartup = true;
+// Flag to always force fresh cookies (prevent old file loading)
+let alwaysFreshCookies = true;
 
-// Enhanced cookie management
-const COOKIE_MANAGEMENT = {
+// Legacy cookie management - now handled by CookieService
+const LEGACY_COOKIE_MANAGEMENT = {
   ESSENTIAL_COOKIES: [
-    "TMUO",
-    "TMPS",
-    "TM_TKTS",
-    "SESSION",
-    "audit",
-    "CMPS",
-    "CMID",
-    "MUID",
-    "au_id",
-    "aud",
-    "tmTrackID",
-    "TapAd_DID",
-    "uid",
+    "TMUO", "TMPS", "TM_TKTS", "SESSION", "audit",
+    "CMPS", "CMID", "MUID", "au_id", "aud",
+    "tmTrackID", "TapAd_DID", "uid"
   ],
-  AUTH_COOKIES: ["TMUO", "TMPS", "TM_TKTS", "SESSION", "audit"],
-  MAX_COOKIE_LENGTH: 8000, // Increased from 4000 for more robust storage
-  COOKIE_REFRESH_INTERVAL: 20 * 60 * 1000, // 20 minutes (standardized timing)
-  MAX_COOKIE_AGE: 7 * 24 * 60 * 60 * 1000, // 7 days maximum cookie lifetime
-  COOKIE_ROTATION: {
-    ENABLED: true,
-    MAX_STORED_COOKIES: 100, // Keep multiple cookie sets
-    ROTATION_INTERVAL: 4 * 60 * 60 * 1000, // 4 hours between rotations
-    LAST_ROTATION: Date.now(),
-  },
+  AUTH_COOKIES: ["TMUO", "TMPS", "TM_TKTS", "SESSION", "audit"]
 };
 
-// Enhanced cookie handling
+// Enhanced cookie handling - now delegated to CookieService
 const handleCookies = {
-  // Extract and validate essential cookies
+  // Extract and validate essential cookies using CookieService
   extractEssentialCookies: (cookies) => {
-    if (!cookies) return "";
-
-    const cookieMap = new Map();
-    cookies.split(";").forEach((cookie) => {
-      const [name, value] = cookie.trim().split("=");
-      if (name && value) {
-        cookieMap.set(name, value);
-      }
-    });
-
-    // Prioritize auth cookies
-    const essentialCookies = [];
-    COOKIE_MANAGEMENT.AUTH_COOKIES.forEach((name) => {
-      if (cookieMap.has(name)) {
-        essentialCookies.push(`${name}=${cookieMap.get(name)}`);
-        cookieMap.delete(name);
-      }
-    });
-
-    // Add other essential cookies if we have space
-    COOKIE_MANAGEMENT.ESSENTIAL_COOKIES.forEach((name) => {
-      if (cookieMap.has(name) && essentialCookies.length < 20) {
-        // Increased from 10
-        essentialCookies.push(`${name}=${cookieMap.get(name)}`);
-        cookieMap.delete(name);
-      }
-    });
-
-    // Add any remaining cookies if they fit
-    if (
-      essentialCookies.join("; ").length < COOKIE_MANAGEMENT.MAX_COOKIE_LENGTH
-    ) {
-      for (const [name, value] of cookieMap.entries()) {
-        const potentialCookie = `${name}=${value}`;
-        if (
-          essentialCookies.join("; ").length + potentialCookie.length + 2 <
-          COOKIE_MANAGEMENT.MAX_COOKIE_LENGTH
-        ) {
-          essentialCookies.push(potentialCookie);
-        }
-      }
-    }
-
-    return essentialCookies.join("; ");
+    return cookieService.extractEssentialCookies(cookies);
   },
 
   // Validate cookie freshness with improved logic
@@ -210,7 +160,7 @@ const handleCookies = {
     });
 
     // More lenient check: require at least 3 auth cookies
-    const authCookiesPresent = COOKIE_MANAGEMENT.AUTH_COOKIES.filter(
+    const authCookiesPresent = LEGACY_COOKIE_MANAGEMENT.AUTH_COOKIES.filter(
       (name) => cookieMap.has(name) && cookieMap.get(name).length > 0
     );
 
@@ -254,39 +204,28 @@ function generateCorrelationId() {
 async function getCapturedData(eventId, proxy, forceRefresh = false) {
   const currentTime = Date.now();
 
-  // If we don't have cookies, try to load them from file first
-  if (!cookieManager.capturedState.cookies) {
-    try {
-      const cookiesFromFile = await loadCookiesFromFile();
-      if (cookiesFromFile) {
-        const cookieAge = cookiesFromFile[0]?.expiry ? 
-                        (cookiesFromFile[0].expiry * 1000 - currentTime) : 
-                        CookieManager.CONFIG.MAX_COOKIE_AGE;
-        
-        if (cookieAge > 0 && cookieAge < CookieManager.CONFIG.MAX_COOKIE_AGE) {
-          cookieManager.capturedState.cookies = cookiesFromFile;
-          cookieManager.capturedState.lastRefresh = currentTime - (CookieManager.CONFIG.MAX_COOKIE_AGE - cookieAge);
-          if (!cookieManager.capturedState.fingerprint) {
-            cookieManager.capturedState.fingerprint = BrowserFingerprint.generate();
-          }
-          if (!cookieManager.capturedState.proxy) {
-            cookieManager.capturedState.proxy = proxy;
-          }
-        }
-      }
-    } catch (error) {
-      console.error("Error loading cookies from file:", error.message);
-    }
+  // ALWAYS force fresh cookies on startup and when explicitly requested
+  if (isStartup || alwaysFreshCookies) {
+    console.log("Forcing fresh cookies collection - skipping file load to ensure freshness");
+    isStartup = false;
+    forceRefresh = true;
   }
 
-  // Check if we need to refresh cookies
+  // COMPLETELY SKIP FILE LOADING - Always use fresh cookies
+  console.log("Skipping file cookie loading - forcing fresh cookie generation for optimal performance");
+  
+  // Set alwaysFreshCookies to ensure we never use stale cookies
+  alwaysFreshCookies = true;
+
+  // Check if we need to refresh cookies - ALWAYS refresh if older than 10 minutes
   const needsRefresh =
     !cookieManager.capturedState.cookies ||
     !cookieManager.capturedState.fingerprint ||
     !cookieManager.capturedState.lastRefresh ||
     !cookieManager.capturedState.proxy ||
-    currentTime - cookieManager.capturedState.lastRefresh > CookieManager.CONFIG.COOKIE_REFRESH_INTERVAL ||
-    forceRefresh;
+    currentTime - cookieManager.capturedState.lastRefresh > 10 * 60 * 1000 || // 10 minutes instead of config
+    forceRefresh ||
+    alwaysFreshCookies; // Always refresh when fresh cookies are forced
 
   if (needsRefresh) {
     // Validate that we have a proxy before attempting cookie refresh
@@ -315,7 +254,7 @@ async function getCapturedData(eventId, proxy, forceRefresh = false) {
   return cookieManager.capturedState;
 }
 
-async function refreshHeaders(eventId, proxy, existingCookies = null) {
+async function refreshHeaders(eventId, proxy, existingCookies = null, forceFresh = false) {
   // If cookies are already being refreshed, add this request to the queue with a timeout
   if (cookieManager.isRefreshingCookies) {
     console.log(
@@ -330,10 +269,11 @@ async function refreshHeaders(eventId, proxy, existingCookies = null) {
           cookieManager.cookieRefreshQueue.splice(index, 1);
         }
         
-        // Try to load existing cookies from file as fallback
+        // Try to load existing cookies from file as fallback (unless forceFresh is true)
         let fallbackCookies = null;
-        try {
-          const existingCookies = await loadCookiesFromFile();
+        if (!forceFresh) {
+          try {
+            const existingCookies = await loadCookiesFromFile();
           if (existingCookies && existingCookies.length > 0) {
             // Check if cookies are not too old (within 2 hours)
             const cookieAge = existingCookies[0]?.expiry ? 
@@ -347,6 +287,7 @@ async function refreshHeaders(eventId, proxy, existingCookies = null) {
           }
         } catch (error) {
           console.warn(`Failed to load fallback cookies: ${error.message}`);
+        }
         }
         
         // Generate fallback headers since we timed out waiting
@@ -394,15 +335,18 @@ async function refreshHeaders(eventId, proxy, existingCookies = null) {
       }
     }, 90000); // 90 second timeout for the entire process
 
-    // Check if we have valid cookies in memory first
+    // FORCE FRESH COOKIES - only use existing cookies if they're very recent (2 minutes max)
     if (
+      !forceFresh &&
       cookieManager.capturedState.cookies?.length &&
       cookieManager.capturedState.lastRefresh &&
-      Date.now() - cookieManager.capturedState.lastRefresh <= COOKIE_MANAGEMENT.COOKIE_REFRESH_INTERVAL
+      Date.now() - cookieManager.capturedState.lastRefresh <= 2 * 60 * 1000 // Only 2 minutes to force freshness
     ) {
-      console.log("Using existing cookies from memory");
+      console.log("Using very recent cookies from memory (less than 2 minutes old)");
       return cookieManager.capturedState;
     }
+    
+    console.log("Forcing fresh cookie generation - skipping old cookies");
 
     // If specific cookies are provided, use them
     if (existingCookies !== null) {
@@ -425,7 +369,7 @@ async function refreshHeaders(eventId, proxy, existingCookies = null) {
     // Use our new module to refresh cookies with circuit breaker protection
     try {
       const result = await cookieRefreshCircuitBreaker.execute(async () => {
-        return await refreshCookies(eventIdToUse, proxyToUse);
+        return await refreshCookies(eventIdToUse, proxyToUse, forceFresh);
       });
       
       if (result && result.cookies) {
@@ -593,8 +537,9 @@ const GetProxy = async () => {
       console.log(`Proxy status: ${availableCount}/${totalProxies} proxies available`);
       
       try {
-        const proxyData = global.proxyManager.getProxyForEvent('random');
-        if (proxyData) {
+        // Note: getProxyForEvent is async, must await!
+        const proxyData = await global.proxyManager.getProxyForEvent('random');
+        if (proxyData && proxyData.proxy) {
           const proxyUrl = new URL(`http://${proxyData.proxy}`);
           const testUrl = `http://${proxyData.username}:${proxyData.password}@${proxyUrl.hostname}:${proxyUrl.port || 80}`;
           const proxyAgent = new HttpsProxyAgent(testUrl, {
@@ -605,51 +550,41 @@ const GetProxy = async () => {
             maxFreeSockets: 256    // Keep more connections open
           });
           return { proxyAgent, proxy: proxyData };
+        } else {
+          console.warn(`ProxyManager returned invalid proxy data:`, proxyData);
         }
       } catch (error) {
-        console.warn(`Failed to get proxy: ${error.message}`);
+        console.warn(`Failed to get proxy from ProxyManager: ${error.message}`);
       }
     }
     
-    // Fallback to old method without health checks
-    let _proxy = [...proxyArray?.proxies];
-    
-    try {
-      const randomProxy = Math.floor(Math.random() * _proxy.length);
-      const selectedProxy = _proxy[randomProxy];
-
-      if (!selectedProxy?.proxy || !selectedProxy?.username || !selectedProxy?.password) {
-        throw new Error("Invalid proxy configuration");
-      }
-
-      const proxyUrl = new URL(`http://${selectedProxy.proxy}`);
-      const proxyURl = `http://${selectedProxy.username}:${selectedProxy.password}@${proxyUrl.hostname}:${proxyUrl.port || 80}`;
+    // If ProxyManager is not available or has no proxies, 
+    // try to refresh the proxy list from database
+    if (global.proxyManager && global.proxyManager.refreshProxyList) {
+      console.log("Attempting to refresh proxy list from database...");
+      await global.proxyManager.refreshProxyList();
       
-      const proxyAgent = new HttpsProxyAgent(proxyURl, {
-        timeout: 30000,        // 30s connection timeout
-        keepAlive: true,       // Reuse connections
-        keepAliveMsecs: 1000,  // Keep alive interval
-        maxSockets: 256,       // Allow more concurrent connections
-        maxFreeSockets: 256    // Keep more connections open
-      });
-      return { proxyAgent, proxy: selectedProxy };
-    } catch (error) {
-      console.warn(`Failed to get proxy: ${error.message}`);
+      // Try again after refresh
+      if (global.proxyManager.proxies.length > 0) {
+        const proxyData = await global.proxyManager.getProxyForEvent('random');
+        if (proxyData && proxyData.proxy) {
+          const proxyUrl = new URL(`http://${proxyData.proxy}`);
+          const testUrl = `http://${proxyData.username}:${proxyData.password}@${proxyUrl.hostname}:${proxyUrl.port || 80}`;
+          const proxyAgent = new HttpsProxyAgent(testUrl, {
+            timeout: 30000,
+            keepAlive: true,
+            keepAliveMsecs: 1000,
+            maxSockets: 256,
+            maxFreeSockets: 256
+          });
+          return { proxyAgent, proxy: proxyData };
+        }
+      }
     }
-
-    // Last resort fallback
-    console.warn("Using fallback proxy");
-    const fallbackProxy = proxyArray.proxies[0];
-    const proxyUrl = new URL(`http://${fallbackProxy.proxy}`);
-    const proxyURl = `http://${fallbackProxy.username}:${fallbackProxy.password}@${proxyUrl.hostname}:${proxyUrl.port || 80}`;
-    const proxyAgent = new HttpsProxyAgent(proxyURl, {
-      timeout: 30000,        // 30s connection timeout
-      keepAlive: true,       // Reuse connections
-      keepAliveMsecs: 1000,  // Keep alive interval
-      maxSockets: 256,       // Allow more concurrent connections
-      maxFreeSockets: 256    // Keep more connections open
-    });
-    return { proxyAgent, proxy: fallbackProxy };
+    
+    // If no proxies available
+    throw new Error("No proxies available. Please ensure proxies are imported to the database.");
+    
   } catch (error) {
     console.error("Critical error in GetProxy:", error);
     throw new Error(`Failed to get any working proxy: ${error.message}`);
@@ -803,20 +738,18 @@ const ScrapeEvent = async (
         // **COOKIE REFRESH SUCCESS GUARD**
         // Check if cookie refresh was successful by validating critical cookies
         if (capturedData.cookies && capturedData.cookies.length > 0) {
-          // Check for critical tmpt cookie
-          const hasTmptCookie = capturedData.cookies.some(cookie => cookie.name === 'tmpt');
-          const criticalCookies = ['tmpt', 'TMUO', 'TMPS', 'TM_TKTS', 'SESSION'];
-          const foundCriticalCookies = capturedData.cookies.filter(cookie => 
-            criticalCookies.includes(cookie.name)
+          // Check for authentication cookies - be more flexible
+          const authCookies = ['tmpt', 'TMUO', 'TMPS', 'TM_TKTS', 'SESSION', 'eps_sid'];
+          const foundAuthCookies = capturedData.cookies.filter(cookie => 
+            authCookies.includes(cookie.name)
           );
           
           console.log(`✓ Cookie refresh successful for event ${eventId}: ${capturedData.cookies.length} cookies captured`);
-          console.log(`✓ Critical cookies found: ${foundCriticalCookies.map(c => c.name).join(', ')} (tmpt: ${hasTmptCookie ? 'YES' : 'NO'})`);
+          console.log(`✓ Authentication cookies found: ${foundAuthCookies.map(c => c.name).join(', ')}`);
           
-          if (!hasTmptCookie) {
-            console.error(`❌ CRITICAL: tmpt cookie missing for event ${eventId}! Cannot proceed without authentication cookies.`);
-            console.error(`Available cookies: ${capturedData.cookies.map(c => c.name).join(', ')}`);
-            throw new Error("Cookie refresh failed: Critical tmpt cookie not found - stopping event processing");
+          // Accept any valid cookies - don't require specific tmpt cookie
+          if (foundAuthCookies.length === 0) {
+            console.warn(`⚠️ No standard auth cookies found, but proceeding with available cookies: ${capturedData.cookies.map(c => c.name).join(', ')}`);
           }
         } else {
           console.error(`❌ Cookie refresh failed for event ${eventId}: No cookies captured - cannot proceed with event scraping`);
@@ -2062,7 +1995,7 @@ async function startPeriodicCookieRefresh() {
       console.error('Error in periodic cookie refresh:', error);
       // Don't retry immediately on error, let the interval handle the next attempt
     }
-  }, COOKIE_MANAGEMENT.COOKIE_REFRESH_INTERVAL);
+  }, 10 * 60 * 1000); // 10 minutes
   
   // Store the interval ID so we can clear it if needed
   return refreshInterval;
@@ -2085,9 +2018,7 @@ async function refreshCookiesPeriodically() {
       let eventId = null;
       
       try {
-        // Import Event model to query the database
-        const { Event } = await import('./models/index.js');
-        
+        // Use the already imported Event model
         // Get random active events from the database
         const randomEvents = await Event.aggregate([
           {
@@ -2225,6 +2156,30 @@ startPeriodicCookieRefresh().catch(error => {
   console.error('Failed to start periodic cookie refresh:', error);
   isPeriodicRefreshStarted = false; // Reset the flag on startup failure
 });
+
+// Start CookieService periodic refresh as backup system
+if (cookieService && typeof cookieService.startPeriodicRefresh === 'function') {
+  try {
+    console.log('Starting CookieService periodic refresh (backup system)...');
+    const cookiePeriodicInterval = cookieService.startPeriodicRefresh(async () => {
+      try {
+        // Get random event for cookie refresh
+        const randomEvents = await Event.aggregate([
+          { $match: { Skip_Scraping: { $ne: true }, url: { $exists: true, $ne: "" } } },
+          { $sample: { size: 1 } },
+          { $project: { Event_ID: 1 } }
+        ]);
+        return randomEvents?.[0]?.Event_ID || null;
+      } catch (error) {
+        console.warn('Failed to get event ID for CookieService periodic refresh:', error.message);
+        return null;
+      }
+    });
+    console.log('CookieService periodic refresh started successfully');
+  } catch (error) {
+    console.error('Failed to start CookieService periodic refresh:', error.message);
+  }
+}
 
 // Export functions that other modules need
 export { 

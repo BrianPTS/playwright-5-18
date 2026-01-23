@@ -3,6 +3,8 @@ import path from 'path';
 import moment from 'moment';
 import { fileURLToPath } from 'url';
 import { dirname } from 'path';
+import { formatTimestamp, formatTimestampWithMs, formatDate } from "../utils/dateUtils.js";
+import logger from "../utils/logger.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -53,7 +55,7 @@ class AdvancedScraperLogger {
   }
   
   getDateString() {
-    return moment().format('YYYY-MM-DD');
+    return formatDate();
   }
   
   async initializeLogger() {
@@ -63,7 +65,7 @@ class AdvancedScraperLogger {
       
       // Initialize log files with headers
       await this.writeToFile(this.logFiles.main, `\n=== SCRAPER SESSION STARTED: ${this.sessionId} ===\n`);
-      await this.writeToFile(this.logFiles.main, `Start Time: ${moment().format('YYYY-MM-DD HH:mm:ss')}\n`);
+      await this.writeToFile(this.logFiles.main, `Start Time: ${formatTimestamp()}\n`);
       await this.writeToFile(this.logFiles.main, `Session ID: ${this.sessionId}\n`);
       await this.writeToFile(this.logFiles.main, `=== CONFIGURATION ===\n`);
       
@@ -95,7 +97,7 @@ class AdvancedScraperLogger {
   }
   
   formatLogEntry(level, category, message, metadata = {}) {
-    const timestamp = moment().format('YYYY-MM-DD HH:mm:ss.SSS');
+    const timestamp = formatTimestampWithMs();
     const runtime = moment.duration(moment().diff(this.startTime)).humanize();
     
     const logEntry = {

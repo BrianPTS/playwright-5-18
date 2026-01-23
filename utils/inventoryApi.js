@@ -1,5 +1,6 @@
 import axios from 'axios';
 import dotenv from "dotenv";
+import logger from './logger.js';
 
 // Load environment variables
 dotenv.config();
@@ -33,8 +34,7 @@ class InventoryApi {
   async deleteInventoryBatch(inventoryIds) {
     try {
       // Debug logging for API request
-      console.log(`[API DEBUG] Attempting to delete inventory batch:`, {
-        url: `${this.baseURL}/inventories/delete`,
+      logger.api(`Attempting to delete inventory batch:`, 'POST', `${this.baseURL}/inventories/delete`, {
         inventoryIds: inventoryIds,
         count: inventoryIds.length,
         headers: {
@@ -51,7 +51,10 @@ class InventoryApi {
         timeout: 15000 // 15 second timeout for batch operations
       });
 
-      console.log(`[API DEBUG] Batch deletion successful:`, response.status, response.data);
+      logger.api(`Batch deletion successful`, 'POST', `${this.baseURL}/inventories/delete`, {
+        status: response.status,
+        data: response.data
+      });
 
       return {
         successful: inventoryIds, // Assume all successful if no error
@@ -60,11 +63,11 @@ class InventoryApi {
         apiResponse: response.data
       };
     } catch (error) {
-      console.error(`Failed to delete inventory batch:`, error.message);
+      logger.error(`Failed to delete inventory batch: ${error.message}`, 'api', error);
       if (error.response) {
-        console.error(`[API DEBUG] Response status:`, error.response.status);
-        console.error(`[API DEBUG] Response data:`, error.response.data);
-        console.error(`[API DEBUG] Response headers:`, error.response.headers);
+        logger.error(`Response status: ${error.response.status}`, 'api');
+        logger.error(`Response data:`, 'api', error.response.data);
+        logger.error(`Response headers:`, 'api', error.response.headers);
       }
       
       // Return failed result for all inventory IDs since batch deletion failed

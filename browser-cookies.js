@@ -1,352 +1,56 @@
-import {devices } from "patchright";
-import fs from "fs/promises";
-import path from "path";
-import { chromium } from 'patchright'
+import { BrowserService, BrowserConfig } from './src/core/services/BrowserService.js';
+import { CookieService, CookieConfig } from './src/core/services/CookieService.js';
+import { BrowserFingerprint } from './browserFingerprint.js';
 
-import { BrowserFingerprint } from "./browserFingerprint.js";
-// Device settings
-const iphone13 = devices["iPhone 13"];
-
-// Constants
-const COOKIES_FILE = "cookies.json";
-const CONFIG = {
-  COOKIE_REFRESH_INTERVAL: 45 * 60 * 1000, // 45 minutes
-  PAGE_TIMEOUT: 90000, // 60 seconds for page operations
-  MAX_RETRIES: 5, // Reduced from 5 to fail faster
-  RETRY_DELAY: 8000, // Reduced from 10s to 8s
-  CHALLENGE_TIMEOUT: 15000, // 15 seconds for challenge handling
-  COOKIE_REFRESH_TIMEOUT: 2 * 60 * 1000, // 2 minutes timeout for cookie refresh
-  MAX_REFRESH_RETRIES: 3, // Maximum retries for cookie refresh with new proxy/event
+// Initialize services
+const logger = {
+  info: (msg) => console.log(`[INFO] ${msg}`),
+  warn: (msg) => console.warn(`[WARN] ${msg}`),
+  error: (msg, error) => console.error(`[ERROR] ${msg}`, error)
 };
 
+const browserService = new BrowserService({ logger });
+const cookieService = new CookieService({ logger, browserService });
+
+// Legacy browser instance for compatibility
 let browser = null;
 
-/**
- * Gets a random location for browser fingerprinting
- */
-function getRandomLocation() {
-  const locations = [
-    { locale: 'en-US', timezone: 'America/Los_Angeles', latitude: 34.052235, longitude: -118.243683 },
-    { locale: 'en-US', timezone: 'America/New_York', latitude: 40.712776, longitude: -74.005974 },
-    { locale: 'en-US', timezone: 'America/Chicago', latitude: 41.878113, longitude: -87.629799 },
-    { locale: 'en-US', timezone: 'America/Denver', latitude: 39.739235, longitude: -104.990250 },
-    { locale: 'en-CA', timezone: 'America/Toronto', latitude: 43.651070, longitude: -79.347015 },
-    { locale: 'en-GB', timezone: 'Europe/London', latitude: 51.507351, longitude: -0.127758 },
-  ];
-  
-  return locations[Math.floor(Math.random() * locations.length)];
-}
 
-/**
- * Generate a realistic iPhone user agent
- */
-function getRealisticIphoneUserAgent() {
-  const iOSVersions = ['15_0', '15_1', '15_2', '15_3', '15_4', '15_5', '15_6', '16_0', '16_1', '16_2'];
-  const version = iOSVersions[Math.floor(Math.random() * iOSVersions.length)];
-  return `Mozilla/5.0 (iPhone; CPU iPhone OS ${version} like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/${version.split('_')[0]}.0 Mobile/15E148 Safari/604.1`;
-}
 
-/**
- * Enhance fingerprint with more browser properties
- */
-function enhancedFingerprint() {
-  const baseFingerprint = BrowserFingerprint.generate();
-  
-  // Add additional properties to make fingerprint more realistic
-  return {
-    ...baseFingerprint,
-    webgl: {
-      vendor: "Apple Inc.",
-      renderer: "Apple GPU",
-    },
-    fonts: [
-      "Arial",
-      "Courier New",
-      "Georgia",
-      "Times New Roman",
-      "Trebuchet MS",
-      "Verdana"
-    ],
-    plugins: [
-      "PDF Viewer",
-      "Chrome PDF Viewer",
-      "Chromium PDF Viewer",
-      "Microsoft Edge PDF Viewer",
-      "WebKit built-in PDF"
-    ],
-    screen: {
-      width: 390,
-      height: 844,
-      availWidth: 390,
-      availHeight: 844,
-      colorDepth: 24,
-      pixelDepth: 24
-    },
-    timezone: {
-      offset: new Date().getTimezoneOffset()
-    }
-  };
-}
 
-/**
- * Simulate various mobile interactions to appear more human-like
- */
-async function simulateMobileInteractions(page) {
-  try {
-    // Get viewport size
-    const viewportSize = page.viewportSize();
-    if (!viewportSize) return;
-    
-    // Random scroll amounts
-    const scrollOptions = [
-      { direction: 'down', amount: 300 },
-      { direction: 'down', amount: 500 },
-      { direction: 'down', amount: 800 },
-      { direction: 'up', amount: 200 },
-      { direction: 'up', amount: 400 }
-    ];
-    
-    // Pick 2-3 random scroll actions
-    const scrollCount = 2 + Math.floor(Math.random() * 2);
-    for (let i = 0; i < scrollCount; i++) {
-      const option = scrollOptions[Math.floor(Math.random() * scrollOptions.length)];
-      
-      // Scroll with a dynamic speed
-      const scrollY = option.direction === 'down' ? option.amount : -option.amount;
-      await page.evaluate((y) => {
-        window.scrollBy({
-          top: y,
-          behavior: 'smooth'
-        });
-      }, scrollY);
-      
-      // Random pause between scrolls (500-2000ms)
-      await page.waitForTimeout(500 + Math.floor(Math.random() * 1500));
-    }
-    
-    // Simulate random taps/clicks (1-2 times)
-    const tapCount = 1 + Math.floor(Math.random() * 2);
-    for (let i = 0; i < tapCount; i++) {
-      // Random position within viewport
-      const x = 50 + Math.floor(Math.random() * (viewportSize.width - 100));
-      const y = 150 + Math.floor(Math.random() * (viewportSize.height - 300));
-      
-      await page.mouse.click(x, y);
-      await page.waitForTimeout(500 + Math.floor(Math.random() * 1000));
-    }
-  } catch (error) {
-    console.warn("Error during mobile interaction simulation:", error.message);
-  }
-}
+
+
+
+
 
 /**
  * Initialize the browser with enhanced fingerprinting
  */
 
+/**
+ * Initialize the browser with enhanced fingerprinting
+ * Legacy wrapper for the new modular BrowserService
+ */
 async function initBrowser(proxy) {
-  let context = null;
-  
   try {
-    // Get randomized human-like properties
-    const location = getRandomLocation();
+    // Use the new modular BrowserService
+    const result = await browserService.initBrowser(proxy);
     
-    // For persisting browser sessions, use same browser if possible
-    if (!browser || !browser.isConnected()) {
-      // Launch options with enhanced stealth
-      const launchOptions = {
-        headless: true,
-        args: [
-          '--disable-blink-features=AutomationControlled',
-          '--disable-features=IsolateOrigins,site-per-process',
-          '--disable-web-security',
-          '--no-sandbox',
-          '--disable-setuid-sandbox',
-          '--no-first-run',
-          '--no-default-browser-check',
-          '--disable-infobars',
-          '--disable-notifications',
-          '--disable-dev-shm-usage',
-          '--disable-gpu',
-          '--disable-background-timer-throttling',
-          '--disable-backgrounding-occluded-windows',
-          '--disable-renderer-backgrounding',
-          '--disable-features=TranslateUI',
-          '--disable-ipc-flooding-protection',
-          '--enable-features=NetworkService,NetworkServiceInProcess',
-          '--force-color-profile=srgb',
-          '--metrics-recording-only',
-          '--mute-audio',
-          '--disable-hang-monitor',
-          '--disable-prompt-on-repost',
-          '--disable-sync',
-          '--password-store=basic',
-          '--use-mock-keychain'
-        ],
-        timeout: 90000,
-      };
-
-      if (proxy && typeof proxy === 'object' && proxy.proxy) {
-        try {
-          // Extract hostname and port from proxy string
-          const proxyString = proxy.proxy;
-          
-          // Ensure proxyString is a string before using string methods
-          if (typeof proxyString !== 'string') {
-            throw new Error('Invalid proxy format: proxy.proxy must be a string, got ' + typeof proxyString);
-          }
-          
-          // Check if proxy string is in correct format (host:port)
-          if (!proxyString.includes(':')) {
-            throw new Error('Invalid proxy format: ' + proxyString);
-          }
-          
-          const [hostname, portStr] = proxyString.split(':');
-          const port = parseInt(portStr) || 80;
-          
-          launchOptions.proxy = {
-            server: `http://${hostname}:${port}`,
-            username: proxy.username,
-            password: proxy.password,
-          };
-          
-          console.log(`Configuring browser with proxy: ${hostname}:${port}`);
-        } catch (error) {
-          console.warn('Invalid proxy configuration, launching without proxy:', error);
-        }
-      }
-
-      // Launch browser
-            browser = await chromium.launch(launchOptions);
-    }
+    // Set legacy browser reference for compatibility
+    browser = result.browser;
     
-    // Create new context with enhanced fingerprinting and stealth
-    context = await browser.newContext({
-      ...iphone13,
-      userAgent: getRealisticIphoneUserAgent(),
-      locale: location.locale,
-      colorScheme: ["dark", "light"][Math.floor(Math.random() * 2)],
-      timezoneId: location.timezone,
-      geolocation: {
-        latitude: location.latitude,
-        longitude: location.longitude,
-        accuracy: 100 * Math.random() + 50,
-      },
-      permissions: [
-        "geolocation",
-        "notifications",
-        "microphone",
-        "camera",
-      ],
-      deviceScaleFactor: 2 + Math.random() * 0.5,
-      hasTouch: true,
-      isMobile: true,
-      javaScriptEnabled: true,
-      acceptDownloads: true,
-      ignoreHTTPSErrors: true,
-      bypassCSP: true,
-      extraHTTPHeaders: {
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.9",
-        "Accept-Language": `${location.locale},en;q=0.9`,
-        "Accept-Encoding": "gzip, deflate, br",
-        "Sec-Fetch-Dest": "document",
-        "Sec-Fetch-Mode": "navigate",
-        "Sec-Fetch-Site": "none",
-        "Sec-Fetch-User": "?1",
-        "DNT": Math.random() > 0.5 ? "1" : "0",
-        "Upgrade-Insecure-Requests": "1",
-        "Cache-Control": "max-age=0"
-      },
-      viewport: {
-        width: [375, 390, 414][Math.floor(Math.random() * 3)],
-        height: [667, 736, 812, 844][Math.floor(Math.random() * 4)]
-      }
-    });
+    // Add human-like delay before any action
+    await result.page.waitForTimeout(1500 + Math.random() * 2500);
+    await browserService.simulateMobileInteractions(result.page);
     
-    // Add stealth scripts to mask automation (Patchright compatible)
-    await context.addInitScript(() => {
-      // Override navigator.webdriver
-      Object.defineProperty(navigator, 'webdriver', {
-        get: () => undefined
-      });
-      
-      // Remove automation indicators
-      try {
-        delete navigator.__proto__.webdriver;
-      } catch (e) {}
-      
-      // Override plugins to look real
-      Object.defineProperty(navigator, 'plugins', {
-        get: () => [1, 2, 3, 4, 5]
-      });
-      
-      // Override languages
-      Object.defineProperty(navigator, 'languages', {
-        get: () => ['en-US', 'en']
-      });
-      
-      // Mock chrome object
-      window.chrome = {
-        runtime: {},
-        loadTimes: function() {},
-        csi: function() {},
-        app: {}
-      };
-      
-      // Override permissions
-      const originalQuery = window.navigator.permissions.query;
-      window.navigator.permissions.query = (parameters) => (
-        parameters.name === 'notifications' ?
-          Promise.resolve({ state: Notification.permission }) :
-          originalQuery(parameters)
-      );
-      
-      // Add realistic connection info
-      Object.defineProperty(navigator, 'connection', {
-        get: () => ({
-          effectiveType: '4g',
-          rtt: 50,
-          downlink: 10,
-          saveData: false
-        })
-      });
-      
-      // Mock battery API
-      Object.defineProperty(navigator, 'getBattery', {
-        get: () => async () => ({
-          charging: Math.random() > 0.5,
-          chargingTime: 0,
-          dischargingTime: Infinity,
-          level: 0.5 + Math.random() * 0.5
-        })
-      });
-      
-      // Mock touch events for mobile
-      window.ontouchstart = null;
-      document.ontouchstart = null;
-      
-      // Add realistic screen properties
-      Object.defineProperty(screen, 'availWidth', { get: () => window.innerWidth });
-      Object.defineProperty(screen, 'availHeight', { get: () => window.innerHeight });
-    });
-    
-    // Create a new page and simulate human behavior
-    const page = await context.newPage();
-    
-    // Set realistic page load timeout
-    page.setDefaultTimeout(CONFIG.PAGE_TIMEOUT);
-    page.setDefaultNavigationTimeout(CONFIG.PAGE_TIMEOUT);
-    
-    // Human-like delay before any action
-    await page.waitForTimeout(1500 + Math.random() * 2500);
-    await simulateMobileInteractions(page);
-    
-    return { context, fingerprint: enhancedFingerprint(), page, browser };
+    return {
+      context: result.context,
+      fingerprint: result.fingerprint,
+      page: result.page,
+      browser: result.browser
+    };
   } catch (error) {
     console.error("Error initializing browser:", error.message);
-    
-    // Cleanup on error
-    if (context) await context.close().catch(() => {});
-    
     throw error;
   }
 } // Added missing closing bracket for initBrowser function
@@ -558,236 +262,31 @@ async function saveCookiesToFile(cookies) {
 /**
  * Load cookies from file
  */
+/**
+ * Load cookies from file
+ * Legacy wrapper for the new modular CookieService
+ */
 async function loadCookiesFromFile() {
   try {
-    const cookiesFile = path.join(process.cwd(), COOKIES_FILE);
-    
-    // Check if file exists
-    try {
-      await fs.access(cookiesFile);
-    } catch (error) {
-      console.log("Cookies file does not exist");
-      return null;
-    }
-    
-    // Read and parse
-    const fileData = await fs.readFile(cookiesFile, 'utf8');
-    const cookies = JSON.parse(fileData);
-    
-    if (!Array.isArray(cookies) || cookies.length === 0) {
-      console.log("Invalid or empty cookies file");
-      return null;
-    }
-    
-    console.log(`Loaded ${cookies.length} cookies from file`);
-    return cookies;
+    return await cookieService.loadCookiesFromFile();
   } catch (error) {
-    console.error(`Error loading cookies from file: ${error.message}`);
+    console.error('Error loading cookies from file:', error.message);
     return null;
   }
 }
 
 /**
  * Get fresh cookies by opening a browser and navigating to Ticketmaster
+ * Legacy wrapper for the new modular CookieService
  */
-async function refreshCookies(eventId, proxy = null) {
-  let retryCount = 0;
-  let lastError = null;
-  
-  while (retryCount <= CONFIG.MAX_REFRESH_RETRIES) {
-    let localContext = null;
-    let page = null;
-    let browserInstance = null;
-    let timeoutId = null;
-    
-    try {
-      console.log(`Refreshing cookies using event ${eventId} (attempt ${retryCount + 1}/${CONFIG.MAX_REFRESH_RETRIES + 1})`);
-
-      // Try to load existing cookies first (only on first attempt)
-      if (retryCount === 0) {
-        const existingCookies = await loadCookiesFromFile();
-        if (existingCookies && existingCookies.length >= 3) {
-          const cookieAge = existingCookies[0]?.expiry ? 
-            (existingCookies[0].expiry * 1000 - Date.now()) : 0;
-          
-          if (cookieAge > 0 && cookieAge < CONFIG.COOKIE_REFRESH_INTERVAL) {
-            console.log(`Using existing cookies (age: ${Math.floor(cookieAge/1000/60)} minutes)`);
-            return {
-              cookies: existingCookies,
-              fingerprint: BrowserFingerprint.generate(),
-              lastRefresh: Date.now()
-            };
-          }
-        }
-      }
-      
-      // Create a promise that will be resolved/rejected based on timeout
-      const refreshPromise = new Promise(async (resolve, reject) => {
-        // Set up timeout
-        timeoutId = setTimeout(() => {
-          reject(new Error(`Cookie refresh timeout after ${CONFIG.COOKIE_REFRESH_TIMEOUT / 1000} seconds`));
-        }, CONFIG.COOKIE_REFRESH_TIMEOUT);
-        
-        try {
-
-          // Initialize browser with improved error handling
-          let initAttempts = 0;
-          let initSuccess = false;
-          let initError = null;
-          
-          while (initAttempts < 3 && !initSuccess) {
-            try {
-              const result = await initBrowser(proxy);
-              if (!result || !result.context || !result.fingerprint) {
-                throw new Error("Failed to initialize browser or generate fingerprint");
-              }
-              
-              browserInstance = result.browser;
-              localContext = result.context;
-              page = result.page;
-              
-              initSuccess = true;
-            } catch (error) {
-              initAttempts++;
-              initError = error;
-              console.error(`Browser init attempt ${initAttempts} failed:`, error.message);
-              await new Promise(resolve => setTimeout(resolve, 1000 * initAttempts));
-            }
-          }
-          
-          if (!initSuccess) {
-            console.error("All browser initialization attempts failed");
-            throw initError || new Error("Failed to initialize browser");
-          }
-
-          // Navigate to event page
-          const url = `https://www.ticketmaster.com/event/${eventId}`;
-          console.log(`Navigating to ${url}`);
-          
-          await page.goto(url, {
-            waitUntil: "domcontentloaded",
-            timeout: CONFIG.PAGE_TIMEOUT
-          });
-          
-          // Check if the page loaded properly
-          const currentUrl = page.url();
-          const pageLoadSuccessful = currentUrl.includes(`/event/${eventId}`);
-          
-          if (!pageLoadSuccessful) {
-            console.warn(`Failed to load event page, URL: ${currentUrl}`);
-            
-            // Try refreshing the page
-            console.log("Attempting to reload the page...");
-            await page.reload({ waitUntil: "domcontentloaded", timeout: CONFIG.PAGE_TIMEOUT });
-            
-            const newUrl = page.url();
-            const reloadSuccessful = newUrl.includes(`/event/${eventId}`);
-            
-            if (!reloadSuccessful) {
-              console.warn(`Reload failed, URL: ${newUrl}`);
-              throw new Error("Failed to load Ticketmaster event page");
-            }
-          }
-          
-          console.log(`Successfully loaded page for event ${eventId}`);
-          
-          // Check for Ticketmaster challenge
-          const isChallengePresent = await checkForTicketmasterChallenge(page);
-          if (isChallengePresent) {
-            console.warn("Detected Ticketmaster challenge page, attempting to resolve...");
-            await handleTicketmasterChallenge(page);
-          }
-          
-          // Simulate human behavior
-          await simulateMobileInteractions(page);
-          
-          // Wait for cookies to be set
-          await page.waitForTimeout(2000);
-          
-          // Capture cookies
-          const fingerprint = BrowserFingerprint.generate();
-          const { cookies } = await captureCookies(page, fingerprint);
-          
-          if (!cookies || cookies.length === 0) {
-            throw new Error("Failed to capture cookies");
-          }
-          
-          // Clear timeout and resolve with success
-          clearTimeout(timeoutId);
-          resolve({
-            cookies,
-            fingerprint,
-            lastRefresh: Date.now()
-          });
-        } catch (error) {
-          clearTimeout(timeoutId);
-          reject(error);
-        }
-      });
-      
-      // Wait for the refresh promise to complete
-      const result = await refreshPromise;
-      return result;
-    } catch (error) {
-      lastError = error;
-      console.error(`Cookie refresh attempt ${retryCount + 1} failed: ${error.message}`);
-      
-      // Check if this was a timeout error
-      const isTimeout = error.message.includes('timeout');
-      
-      if (isTimeout && retryCount < CONFIG.MAX_REFRESH_RETRIES) {
-        console.log(`Cookie refresh timed out, will retry with new proxy and event ID`);
-        
-        // Generate a new event ID for retry (use a different event from the same venue/artist)
-        const newEventId = await generateAlternativeEventId(eventId);
-        if (newEventId && newEventId !== eventId) {
-          console.log(`Using alternative event ID for retry: ${newEventId}`);
-          eventId = newEventId;
-        }
-        
-        // Get a new proxy for retry
-        if (proxy) {
-          const newProxy = await getAlternativeProxy(proxy);
-          if (newProxy) {
-            console.log(`Using alternative proxy for retry: ${newProxy.host}:${newProxy.port}`);
-            proxy = newProxy;
-          }
-        }
-      }
-      
-      retryCount++;
-      
-      // If we've exhausted all retries, throw the last error
-      if (retryCount > CONFIG.MAX_REFRESH_RETRIES) {
-        console.error(`All cookie refresh attempts failed after ${CONFIG.MAX_REFRESH_RETRIES + 1} tries`);
-        throw lastError;
-      }
-      
-      // Wait before retrying
-      await new Promise(resolve => setTimeout(resolve, CONFIG.RETRY_DELAY * retryCount));
-      
-    } finally {
-      // Close page and context but keep browser open for reuse
-      if (page) {
-        try {
-          await page.close().catch(e => console.error("Error closing page:", e));
-        } catch (e) {
-          console.error("Error closing page in finally block:", e);
-        }
-      }
-      
-      if (localContext) {
-        try {
-          await localContext.close().catch(e => console.error("Error closing context:", e));
-        } catch (e) {
-          console.error("Error closing context in finally block:", e);
-        }
-      }
-    }
+async function refreshCookies(eventId, proxy = null, forceFresh = false) {
+  try {
+    // Use the new modular CookieService
+    return await cookieService.refreshCookies(eventId, proxy, forceFresh);
+  } catch (error) {
+    console.error(`Cookie refresh failed for event ${eventId}:`, error.message);
+    throw error;
   }
-  
-  // This should never be reached, but just in case
-  throw lastError || new Error('Cookie refresh failed after all retries');
 }
 
 /**
@@ -831,6 +330,12 @@ async function cleanup() {
   }
 }
 
+// Legacy wrapper functions for compatibility
+const enhancedFingerprint = () => browserService.generateEnhancedFingerprint();
+const getRandomLocation = () => browserService.getRandomLocation();  
+const getRealisticIphoneUserAgent = () => browserService.getRealisticIphoneUserAgent();
+const simulateMobileInteractions = async (page) => browserService.simulateMobileInteractions(page);
+
 export {
   initBrowser,
   captureCookies,
@@ -844,5 +349,8 @@ export {
   getRandomLocation,
   getRealisticIphoneUserAgent,
   generateAlternativeEventId,
-  simulateMobileInteractions
+  simulateMobileInteractions,
+  // Export services for advanced usage
+  browserService,
+  cookieService
 };

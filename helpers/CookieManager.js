@@ -9,10 +9,12 @@ import config from "../config/scraperConfig.js";
 import { BrowserFingerprint } from "../browserFingerprint.js";
 import { ScraperManager } from "../scraperManager.js";
 import SessionManager from "./SessionManager.js";
+import { CookieService } from "../src/core/services/CookieService.js";
+import { BrowserService } from "../src/core/services/BrowserService.js";
 
 /**
  * CookieManager handles cookie and session management for the scraper
- * Now integrates with SessionManager for robust session handling
+ * Now integrates with modular services for improved architecture
  */
 export class CookieManager {
   constructor(logger) {
@@ -33,28 +35,34 @@ export class CookieManager {
 
     // Initialize SessionManager
     this.sessionManager = new SessionManager(logger);
+    
+    // Initialize modular services
+    this.browserService = new BrowserService({ logger });
+    this.cookieService = new CookieService({ logger, browserService: this.browserService });
   }
 
-  // Configuration constants
-  static CONFIG = {
-    COOKIE_REFRESH_INTERVAL: 20 * 60 * 1000, // 20 minutes (standardized timing)
-    MAX_COOKIE_LENGTH: 8000,
-    MAX_COOKIE_AGE: 7 * 24 * 60 * 60 * 1000, // 7 days
-    COOKIE_ROTATION: {
-      ENABLED: true,
-      MAX_STORED_COOKIES: 100,
-      ROTATION_INTERVAL: 4 * 60 * 60 * 1000, // 4 hours
-      LAST_ROTATION: Date.now(),
-    },
-    PERIODIC_REFRESH_INTERVAL: () => {
-      // Random interval between 20-30 minutes
-      const minMinutes = 20;
-      const maxMinutes = 30;
-      const randomMinutes =
-        Math.floor(Math.random() * (maxMinutes - minMinutes + 1)) + minMinutes;
-      return randomMinutes * 60 * 1000;
-    }, // Random 20-30 minutes
-  };
+  // Configuration constants - now delegated to services
+  static get CONFIG() {
+    return {
+      COOKIE_REFRESH_INTERVAL: 10 * 60 * 1000, // 10 minutes
+      MAX_COOKIE_LENGTH: 8000,
+      MAX_COOKIE_AGE: 7 * 24 * 60 * 60 * 1000, // 7 days
+      COOKIE_ROTATION: {
+        ENABLED: true,
+        MAX_STORED_COOKIES: 100,
+        ROTATION_INTERVAL: 4 * 60 * 60 * 1000, // 4 hours
+        LAST_ROTATION: Date.now(),
+      },
+      PERIODIC_REFRESH_INTERVAL: () => {
+        // Random interval between 9-11 minutes for faster refresh
+        const minMinutes = 9;
+        const maxMinutes = 11;
+        const randomMinutes =
+          Math.floor(Math.random() * (maxMinutes - minMinutes + 1)) + minMinutes;
+        return randomMinutes * 60 * 1000;
+      },
+    };
+  }
 
   // Essential cookies that must be present
   static ESSENTIAL_COOKIES = [
@@ -610,7 +618,7 @@ export class CookieManager {
         return;
       }
 
-      const { proxy } = GetProxy();
+      const { proxy } = await GetProxy();
 
       const newState = await refreshHeaders(eventId, proxy, null);
 

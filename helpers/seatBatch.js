@@ -1,4 +1,5 @@
 import moment from "moment";
+import { formatInHandDate } from "../utils/dateUtils.js";
 import * as fs from 'fs';
 // Function to generate unique 10-digit inventory ID
 
@@ -301,7 +302,7 @@ function CreateInventoryAndLine(data, offer, event, descriptions) {
       stockType: "MOBILE_TRANSFER",
       lineType: "PURCHASE",
       seatType: "CONSECUTIVE",
-      inHandDate: moment(event?.inHandDate).format("YYYY-MM-DD"), // Format: 2024-12-22
+      inHandDate: formatInHandDate(event?.inHandDate), // Format: 2024-12-22
       // "notes": "+stub +geek +tnet +vivid +tevo +pick",
       notes: "-tnow -tmplus -stub",
       tags: "AWS",

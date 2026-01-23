@@ -1,5 +1,5 @@
 import moment from "moment";
-import { setTimeout } from "timers/promises";
+import { setTimeout as delay } from "timers/promises";
 import { Event, ErrorLog, ConsecutiveGroup } from "./models/index.js";
 import { ScrapeEvent, refreshHeaders, generateEnhancedHeaders } from "./scraper.js";
 import * as fs from "fs";
@@ -60,9 +60,9 @@ const DISABLE_AUTO_STOP = true; // Global constant to disable auto-stopping of s
 // Logging levels: 0 = errors only, 1 = warnings + errors, 2 = info + warnings + errors, 3 = all (verbose)
 const LOG_LEVEL = 3; // Default to warnings and errors only
 
-// Cookie expiration threshold: refresh cookies every 20 minutes
-const COOKIE_EXPIRATION_MS = 20 * 60 * 1000; // 20 minutes (standardized timing)
-const SESSION_REFRESH_INTERVAL = 20 * 60 * 1000; // 20 minutes for session refresh (standardized)
+// Cookie expiration threshold: refresh cookies every 10 minutes
+const COOKIE_EXPIRATION_MS = 10 * 60 * 1000; // 10 minutes (standardized timing)
+const SESSION_REFRESH_INTERVAL = 10 * 60 * 1000; // 10 minutes for session refresh (faster refresh)
 
 // Anti-bot helpers: rotate User-Agent and spoof IP
 const generateRandomIp = () => Array.from({ length: 4 }, () => Math.floor(Math.random() * 256)).join('.');
@@ -102,7 +102,7 @@ const COOKIE_MANAGEMENT = {
   ],
   AUTH_COOKIES: ["TMUO", "TMPS", "TM_TKTS", "SESSION", "audit"],
   MAX_COOKIE_LENGTH: 8000,
-  COOKIE_REFRESH_INTERVAL: 20 * 60 * 1000, // 20 minutes (standardized timing)
+  COOKIE_REFRESH_INTERVAL: 10 * 60 * 1000, // 10 minutes (faster refresh timing)
   MAX_COOKIE_AGE:   30 * 60 * 60 * 1000,
   COOKIE_ROTATION: {
     ENABLED: true,
@@ -173,6 +173,9 @@ export class ScraperManager {
 
     // Initialize inventory API for external deletions
     this.inventoryApi = new InventoryApi();
+
+    // Track successful batch timing to prevent false emergency slowdown alerts
+    this.lastSuccessfulBatch = Date.now();
   }
 
   logWithTime(message, type = "info") {
@@ -306,6 +309,37 @@ export class ScraperManager {
       // Start cookie rotation
       this.forcePeriodicCookieRotation();
 
+      // Start CookieService periodic refresh (backup system)
+      if (this.cookieService && typeof this.cookieService.startPeriodicRefresh === 'function') {
+        try {
+          this.cookiePeriodicIntervalId = this.cookieService.startPeriodicRefresh(
+            async () => {
+              // Get random event for cookie refresh
+              try {
+                const randomEvents = await Event.aggregate([
+                  { $match: { Skip_Scraping: { $ne: true }, url: { $exists: true, $ne: "" } } },
+                  { $sample: { size: 1 } },
+                  { $project: { Event_ID: 1 } }
+                ]);
+                return randomEvents?.[0]?.Event_ID || null;
+              } catch (error) {
+                console.warn('Failed to get event ID for periodic refresh:', error.message);
+                return null;
+              }
+            }
+          );
+          this.logWithTime(
+            "Started CookieService periodic refresh (20-minute backup system)",
+            "success"
+          );
+        } catch (error) {
+          this.logWithTime(
+            `Failed to start CookieService periodic refresh: ${error.message}`,
+            "warning"
+          );
+        }
+      }
+
       // Start failure tracking cleanup (every 10 minutes)
       setInterval(() => {
         this.cleanupFailureTracking();
@@ -340,6 +374,20 @@ export class ScraperManager {
 
     this.isRunning = false;
     this.logWithTime("Stopping continuous scraping...", "warning");
+
+    // Clear cookie rotation interval
+    if (this.cookieRotationIntervalId) {
+      clearInterval(this.cookieRotationIntervalId);
+      this.cookieRotationIntervalId = null;
+      this.logWithTime("Stopped cookie rotation interval", "info");
+    }
+
+    // Clear CookieService periodic refresh interval
+    if (this.cookiePeriodicIntervalId) {
+      clearInterval(this.cookiePeriodicIntervalId);
+      this.cookiePeriodicIntervalId = null;
+      this.logWithTime("Stopped CookieService periodic refresh interval", "info");
+    }
 
     // Clear any active jobs
     this.activeJobs.clear();
@@ -679,8 +727,9 @@ export class ScraperManager {
         }
 
         // Second attempt: Get a random proxy for refreshing headers
+        // Note: getProxyForEvent is async!
         const cookieProxy =
-          this.proxyManager.getProxyForEvent(eventToUse);
+          await this.proxyManager.getProxyForEvent(eventToUse);
 
         // Try to refresh headers with the proxy (now includes retry mechanism)
         let capturedState = null;
@@ -703,29 +752,7 @@ export class ScraperManager {
           );
         }
 
-        // If no valid state captured, try without proxy as last resort
-        if (
-          !capturedState ||
-          !capturedState.cookies ||
-          capturedState.cookies.length < MIN_VALID_COOKIES
-        ) {
-          this.logWithTime(
-            `Trying to refresh headers without proxy for ${eventToUse} (includes retry mechanism)`,
-            "warning"
-          );
-          try {
-            capturedState = await refreshHeaders(eventToUse);
-            this.logWithTime(
-              `Successfully refreshed cookies for ${eventToUse} without proxy`,
-              "info"
-            );
-          } catch (error) {
-            this.logWithTime(
-              `Cookie refresh failed for ${eventToUse} without proxy after retries: ${error.message}`,
-              "warning"
-            );
-          }
-        }
+        // Do not refresh cookies without a proxy
 
         if (
           capturedState &&
@@ -922,7 +949,7 @@ export class ScraperManager {
         "Applying 30-second cooldown to allow for cookie regeneration",
         "info"
       );
-      await setTimeout(30000);
+      await delay(30000);
 
       // Trigger a headers refresh on the next event
       return true;
@@ -1945,7 +1972,7 @@ export class ScraperManager {
     }
 
     this.logWithTime(
-      "Starting 20-minute cookie and session rotation schedule",
+      "Starting 10-minute cookie and session rotation schedule",
       "info"
     );
 
@@ -1957,15 +1984,29 @@ export class ScraperManager {
       );
     });
 
-    // Set up rotation interval (20 minutes)
-    this.cookieRotationIntervalId = setInterval(() => {
-      // Non-blocking rotation
-      this.rotateAllCookiesAndSessions().catch((err) => {
+    // Set up rotation interval (10 minutes)
+    this.cookieRotationIntervalId = setInterval(async () => {
+      try {
+        this.logWithTime(
+          "Running scheduled 10-minute cookie rotation",
+          "info"
+        );
+        await this.rotateAllCookiesAndSessions();
+        this.logWithTime(
+          "Scheduled cookie rotation completed successfully",
+          "success"
+        );
+      } catch (err) {
         this.logWithTime(
           `Periodic cookie rotation error: ${err.message}`,
           "error"
         );
-      });
+        // Continue interval - don't let one error stop the schedule
+        this.logWithTime(
+          "Cookie rotation will retry in 10 minutes",
+          "info"
+        );
+      }
     }, SESSION_REFRESH_INTERVAL);
 
     return this.cookieRotationIntervalId;
@@ -1998,7 +2039,7 @@ export class ScraperManager {
           const sessionPromise = this.sessionManager.forceSessionRotation();
           const sessionResult = await Promise.race([
             sessionPromise,
-            setTimeout(30000).then(() => {
+            delay(30000).then(() => {
               throw new Error("Session rotation timed out after 30 seconds");
             }),
           ]);
@@ -2016,7 +2057,7 @@ export class ScraperManager {
           const cookiePromise = this.resetCookiesAndHeaders();
           const cookieResult = await Promise.race([
             cookiePromise,
-            setTimeout(30000).then(() => {
+            delay(30000).then(() => {
               throw new Error("Cookie reset timed out after 30 seconds");
             }),
           ]);
@@ -2048,7 +2089,7 @@ export class ScraperManager {
 
           const randomEvents = await Promise.race([
             randomEventsPromise,
-            setTimeout(10000).then(() => {
+            delay(10000).then(() => {
               throw new Error("Database query timed out after 10 seconds");
             }),
           ]);
@@ -2067,7 +2108,7 @@ export class ScraperManager {
               sessionPromises.push(
                 Promise.race([
                   this.refreshEventHeaders(eventId, true),
-                  setTimeout(15000).then(() => {
+                  delay(15000).then(() => {
                     throw new Error(`Header refresh timed out for ${eventId}`);
                   }),
                 ])
@@ -2086,13 +2127,13 @@ export class ScraperManager {
               );
 
               // Small delay between starting refreshes
-              await setTimeout(100);
+              await delay(100);
             }
 
             // Wait for all session promises with overall timeout
             await Promise.race([
               Promise.allSettled(sessionPromises),
-              setTimeout(60000).then(() => {
+              delay(60000).then(() => {
                 throw new Error("Session creation timed out after 60 seconds");
               }),
             ]);
@@ -2117,7 +2158,7 @@ export class ScraperManager {
                 fallbackPromises.push(
                   Promise.race([
                     this.refreshEventHeaders(cachedId, true),
-                    setTimeout(15000).then(() => {
+                    delay(15000).then(() => {
                       throw new Error(
                         `Header refresh timed out for ${cachedId}`
                       );
@@ -2136,13 +2177,13 @@ export class ScraperManager {
                       )
                     )
                 );
-                await setTimeout(100);
+                await delay(100);
               }
 
               // Wait for all fallback promises with timeout
               await Promise.race([
                 Promise.allSettled(fallbackPromises),
-                setTimeout(45000).then(() => {
+                delay(45000).then(() => {
                   throw new Error(
                     "Fallback session creation timed out after 45 seconds"
                   );
@@ -2173,7 +2214,7 @@ export class ScraperManager {
 
               await Promise.race([
                 this.refreshEventHeaders(fallbackId, true),
-                setTimeout(15000).then(() => {
+                delay(15000).then(() => {
                   throw new Error(
                     `Final header refresh timed out for ${fallbackId}`
                   );
@@ -2192,7 +2233,7 @@ export class ScraperManager {
                   .lean();
                 const fallbackEvent = await Promise.race([
                   fallbackEventPromise,
-                  setTimeout(10000).then(() => {
+                  delay(10000).then(() => {
                     throw new Error(
                       "Final database query timed out after 10 seconds"
                     );
@@ -2202,7 +2243,7 @@ export class ScraperManager {
                 if (fallbackEvent) {
                   await Promise.race([
                     this.refreshEventHeaders(fallbackEvent.Event_ID, true),
-                    setTimeout(15000).then(() => {
+                    delay(15000).then(() => {
                       throw new Error(
                         `Final header refresh timed out for ${fallbackEvent.Event_ID}`
                       );
@@ -2257,7 +2298,8 @@ export class ScraperManager {
    */
   async startConcurrentProcessing() {
     let consecutiveFailures = 0;
-    let lastSuccessfulBatch = Date.now();
+    // Use class property instead of local variable
+    // let lastSuccessfulBatch = Date.now(); // Removed - now using this.lastSuccessfulBatch
     let circuitBreakerOpen = false;
     let circuitBreakerOpenTime = 0;
     const CIRCUIT_BREAKER_THRESHOLD = 8; // Open circuit after 8 consecutive failures
@@ -2273,7 +2315,7 @@ export class ScraperManager {
             this.logWithTime("Circuit breaker reset - resuming normal processing", "success");
           } else {
             // Wait briefly and continue to next iteration
-            await setTimeout(2000);
+            await delay(2000);
             continue;
           }
         }
@@ -2315,7 +2357,7 @@ export class ScraperManager {
               // Update tracking based on parallel processing results
               if (parallelResult.successRate > 0.6) {
                 consecutiveFailures = 0;
-                lastSuccessfulBatch = Date.now();
+                this.lastSuccessfulBatch = Date.now();
               } else {
                 // Don't increment failures as aggressively for parallel processing
                 consecutiveFailures = Math.min(consecutiveFailures + 1, 2);
@@ -2335,7 +2377,7 @@ export class ScraperManager {
               // Failure-resistant delay after parallel processing
               const parallelDelay =
                 parallelResult.successRate > 0.5 ? 200 : 400;
-              await setTimeout(parallelDelay + Math.random() * 100);
+              await delay(parallelDelay + Math.random() * 100);
               continue; // Skip regular batch processing
             }
           }
@@ -2370,7 +2412,7 @@ export class ScraperManager {
 
           // Optimized jitter for fast batch processing
           const jitterDelay = Math.random() * 500; // Reduced to 0-500ms for faster processing
-          await setTimeout(jitterDelay);
+          await delay(jitterDelay);
 
           // Process batch with optimized staggered starts for 3-event batches
           const processingPromises = batch.map(async (eventId, index) => {
@@ -2387,7 +2429,7 @@ export class ScraperManager {
               // For larger batches, slightly more stagger (100-300ms)
               staggerDelay = index * (100 + Math.random() * 200);
             }
-            await setTimeout(staggerDelay);
+            await delay(staggerDelay);
 
             try {
               this.processingEvents.add(eventId);
@@ -2397,7 +2439,7 @@ export class ScraperManager {
 
               const result = await Promise.race([
                 this.scrapeEventWithNaturalBehavior(eventId),
-                setTimeout(processingTimeout).then(() => {
+                delay(processingTimeout).then(() => {
                   throw new Error(
                     `Processing timeout after ${processingTimeout}ms`
                   );
@@ -2407,6 +2449,8 @@ export class ScraperManager {
               if (result) {
                 this.eventLastProcessedTime.set(eventId, Date.now());
                 this.resetEventFailureTracking(eventId);
+                // Update last successful batch time for ANY successful event
+                this.lastSuccessfulBatch = Date.now();
                 this.logWithTime(
                   `✅ Successfully processed event ${eventId}`,
                   "success"
@@ -2429,10 +2473,10 @@ export class ScraperManager {
               // Optimized post-processing delay for fast batches
               if (batchSize <= 3) {
                 // Minimal delay for small batches (25-75ms)
-                await setTimeout(25 + Math.random() * 50);
+                await delay(25 + Math.random() * 50);
               } else {
                 // Standard delay for larger batches (50-100ms)
-                await setTimeout(50 + Math.random() * 50);
+                await delay(50 + Math.random() * 50);
               }
             }
           });
@@ -2449,7 +2493,7 @@ export class ScraperManager {
 
           if (batchSuccessRate > 0.7) {
             consecutiveFailures = 0;
-            lastSuccessfulBatch = Date.now();
+            this.lastSuccessfulBatch = Date.now();
           } else {
             consecutiveFailures++;
           }
@@ -2483,22 +2527,22 @@ export class ScraperManager {
           // Minimal jitter for consistent high throughput
           nextBatchDelay += Math.random() * 150;
 
-          await setTimeout(nextBatchDelay);
+          await delay(nextBatchDelay);
         } else {
           // No events to process, wait before checking again
-          await setTimeout(
+          await delay(
             config.PROCESSING_INTERVAL * 2 + Math.random() * 1000
           );
         }
 
         // Emergency slowdown if no successful batches for too long
-        if (Date.now() - lastSuccessfulBatch > 300000) {
+        if (Date.now() - this.lastSuccessfulBatch > 300000) {
           // 5 minutes
           this.logWithTime(
             "No successful batches for 5 minutes, implementing emergency slowdown",
             "error"
           );
-          await setTimeout(10000); // 10 second pause
+          await delay(10000); // 10 second pause
           consecutiveFailures = Math.max(consecutiveFailures, 5);
         }
       } catch (error) {
@@ -2514,7 +2558,7 @@ export class ScraperManager {
           config.PROCESSING_INTERVAL *
             Math.pow(2, Math.min(consecutiveFailures, 5))
         );
-        await setTimeout(errorDelay);
+        await delay(errorDelay);
       }
     }
   }
@@ -2742,7 +2786,7 @@ export class ScraperManager {
 
     // Add small stagger between parallel batches
     if (batchIndex > 0) {
-      await setTimeout(batchIndex * 100);
+      await delay(batchIndex * 100);
     }
 
     const processingPromises = batch.map(async (eventId, index) => {
@@ -2752,14 +2796,14 @@ export class ScraperManager {
 
       // Minimal stagger within batch
       const staggerDelay = index * 75; // 75ms between events in batch
-      await setTimeout(staggerDelay);
+      await delay(staggerDelay);
 
       try {
         this.processingEvents.add(eventId);
 
         const result = await Promise.race([
           this.scrapeEventWithNaturalBehavior(eventId),
-          setTimeout(config.SCRAPE_TIMEOUT + 5000).then(() => {
+          delay(config.SCRAPE_TIMEOUT + 5000).then(() => {
             throw new Error(`Batch processing timeout`);
           }),
         ]);
@@ -2767,6 +2811,8 @@ export class ScraperManager {
         if (result) {
           this.eventLastProcessedTime.set(eventId, Date.now());
           this.resetEventFailureTracking(eventId);
+          // Update last successful batch time for ANY successful event
+          this.lastSuccessfulBatch = Date.now();
           return { eventId, success: true };
         } else {
           await this.handleEventFailureGracefully(eventId);
@@ -2810,7 +2856,7 @@ export class ScraperManager {
     try {
       // Add natural pre-processing delay (human-like behavior)
       const preDelay = 200 + Math.random() * 800; // 200-1000ms
-      await setTimeout(preDelay);
+      await delay(preDelay);
 
       // Check if we should skip due to recent processing - reduced interval for 10k+ events
       const lastProcessed = this.eventLastProcessedTime.get(eventId);
@@ -2840,7 +2886,8 @@ export class ScraperManager {
 
       while (proxyAttempts < maxProxyAttempts && !proxy) {
         try {
-          const proxyData = this.proxyManager.getProxyForEvent(eventId);
+          // Note: getProxyForEvent is async!
+          const proxyData = await this.proxyManager.getProxyForEvent(eventId);
           if (proxyData) {
             const proxyAgentData =
               this.proxyManager.createProxyAgent(proxyData);
@@ -2856,7 +2903,7 @@ export class ScraperManager {
             "warning"
           );
           if (proxyAttempts < maxProxyAttempts) {
-            await setTimeout(1000 * proxyAttempts); // Progressive delay
+            await delay(1000 * proxyAttempts); // Progressive delay
           }
         }
       }
@@ -2903,7 +2950,7 @@ export class ScraperManager {
             "warning"
           );
           if (headerAttempts < maxHeaderAttempts) {
-            await setTimeout(2000 * headerAttempts); // Progressive delay
+            await delay(2000 * headerAttempts); // Progressive delay
           }
         }
       }
@@ -2924,14 +2971,14 @@ export class ScraperManager {
 
       // Add natural pre-scrape delay
       const preScrapeDelay = 300 + Math.random() * 700; // 300-1000ms
-      await setTimeout(preScrapeDelay);
+      await delay(preScrapeDelay);
 
       // Perform scrape with extended timeout for natural behavior
       const extendedTimeout = (config.SCRAPE_TIMEOUT || 30000) + 5000; // Extra 5s
 
       const result = await Promise.race([
         this.throttledScrapeEvent(eventWithNaturalSession, proxyAgent, proxy),
-        setTimeout(extendedTimeout).then(() => {
+        delay(extendedTimeout).then(() => {
           throw new Error(`Natural scrape timeout after ${extendedTimeout}ms`);
         }),
       ]);
@@ -2948,7 +2995,7 @@ export class ScraperManager {
 
       // Add natural post-processing delay
       const postDelay = 100 + Math.random() * 400; // 100-500ms
-      await setTimeout(postDelay);
+      await delay(postDelay);
 
       // Update metadata and tracking
       await this.updateEventMetadataAsync(eventId, result);
@@ -3063,7 +3110,8 @@ export class ScraperManager {
 
       // Get a unique proxy for this specific event
       try {
-        const proxyData = this.proxyManager.getProxyForEvent(eventId);
+        // Note: getProxyForEvent is async!
+        const proxyData = await this.proxyManager.getProxyForEvent(eventId);
         if (proxyData) {
           const proxyAgentData = this.proxyManager.createProxyAgent(proxyData);
           proxyAgent = proxyAgentData.proxyAgent;
@@ -3116,7 +3164,7 @@ export class ScraperManager {
       // Quick scrape with shorter timeout and unique session using throttled function
       const result = await Promise.race([
         this.throttledScrapeEvent(eventWithUniqueSession, proxyAgent, proxy),
-        setTimeout(SCRAPE_TIMEOUT).then(() => {
+        delay(SCRAPE_TIMEOUT).then(() => {
           throw new Error("Scrape timeout");
         }),
       ]);
@@ -3750,7 +3798,8 @@ export class ScraperManager {
                 // Just get a new proxy - no blocking
                 try {
                   this.proxyManager.releaseProxy(eventId, false);
-                  const proxyData = this.proxyManager.getProxyForEvent(eventId);
+                  // Note: getProxyForEvent is async!
+                  const proxyData = await this.proxyManager.getProxyForEvent(eventId);
                   if (proxyData) {
                     const { proxyAgent, proxy } = this.proxyManager.createProxyAgent(proxyData);
                     this.logWithTime(
@@ -3809,7 +3858,7 @@ export class ScraperManager {
           }
 
           // Small delay between strategies
-          await setTimeout(200);
+          await delay(200);
         }
 
         if (!recovered) {
@@ -3824,7 +3873,7 @@ export class ScraperManager {
         }
 
         // Delay between events to avoid overwhelming the system
-        await setTimeout(500);
+        await delay(500);
       } catch (error) {
         results.failed.push(eventId);
         this.logWithTime(
@@ -3947,7 +3996,7 @@ export class ScraperManager {
           }
 
           // Small delay between approaches
-          await setTimeout(300);
+          await delay(300);
         }
 
         if (!recovered) {
@@ -3959,7 +4008,7 @@ export class ScraperManager {
         }
 
         // Small delay between recovery attempts
-        await setTimeout(500);
+        await delay(500);
       } catch (error) {
         results.failed.push(eventId);
         this.logWithTime(
@@ -4421,7 +4470,7 @@ export class ScraperManager {
       try {
         await Promise.race([
           this.sessionManager.forceSessionRotation(),
-          setTimeout(20000).then(() => {
+          delay(20000).then(() => {
             throw new Error(
               "Session rotation timed out during emergency recovery"
             );

@@ -1,19 +1,23 @@
 import ProxyManager from './helpers/ProxyManager.js';
+import logger from './utils/logger.js';
 
 /**
  * Setup global components and configuration for the application
  */
-function setupGlobals() {
-  console.log('Initializing global components...');
+async function setupGlobals() {
+  logger.info('Initializing global components...', 'setup');
 
   // Create a global ProxyManager instance
   if (!global.proxyManager) {
     global.proxyManager = new ProxyManager({
-      info: console.log,
-      warn: console.warn,
-      error: console.error
+      info: (msg) => logger.info(msg, 'proxy'),
+      warn: (msg) => logger.warn(msg, 'proxy'),
+      error: (msg, err) => logger.error(msg, 'proxy', err)
     });
-    console.log(`Global ProxyManager initialized with ${global.proxyManager.proxies.length} proxies`);
+    
+    // Initialize ProxyManager with database
+    await global.proxyManager.initialize();
+    logger.info(`Global ProxyManager initialized with ${global.proxyManager.proxies.length} proxies`, 'setup');
   }
   
   // Track global statistics
@@ -35,31 +39,35 @@ function setupGlobals() {
   // Set up periodic stats logging
   setInterval(() => {
     const uptime = Math.floor((new Date() - global.stats.startTime) / 1000 / 60);
-    console.log(`=== STATS (${uptime} minutes uptime) ===`);
-    console.log(`Total Requests: ${global.stats.totalRequests}`);
-    console.log(`Success Rate: ${(global.stats.successfulRequests / global.stats.totalRequests * 100 || 0).toFixed(2)}%`);
-    console.log(`Errors: 403=${global.stats.errors['403']}, 429=${global.stats.errors['429']}, network=${global.stats.errors['network']}, timeout=${global.stats.errors['timeout']}, other=${global.stats.errors['other']}`);
+    const stats = {
+      uptime,
+      totalRequests: global.stats.totalRequests,
+      successRate: (global.stats.successfulRequests / global.stats.totalRequests * 100 || 0).toFixed(2),
+      errors: global.stats.errors
+    };
+    logger.info(`STATS (${uptime} minutes uptime)`, 'stats', stats);
     
     // Log proxy usage statistics
     const proxyStats = global.proxyManager.getUsageStats();
-    console.log(`Proxy Usage: ${proxyStats.usedProxies}/${proxyStats.totalProxies} proxies used`);
-    console.log(`Healthy Proxies: ${proxyStats.healthyProxies}/${proxyStats.totalProxies}`);
-    console.log(`Banned Proxies: ${proxyStats.bannedProxies}`);
-    console.log('==============================');
+    logger.info('Proxy Statistics', 'proxy', {
+      used: `${proxyStats.usedProxies}/${proxyStats.totalProxies}`,
+      healthy: `${proxyStats.healthyProxies}/${proxyStats.totalProxies}`,
+      banned: proxyStats.bannedProxies
+    });
   }, 5 * 60 * 1000); // Every 5 minutes
   
   // Set up error tracking
   process.on('uncaughtException', (err) => {
-    console.error('Uncaught Exception:', err);
+    logger.error('Uncaught Exception:', 'process', err);
     // Continue running despite error
   });
   
   process.on('unhandledRejection', (reason, promise) => {
-    console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+    logger.error('Unhandled Rejection', 'process', { promise, reason });
     // Continue running despite error
   });
   
-  console.log('Global components initialized successfully');
+  logger.info('Global components initialized successfully', 'setup');
 }
 
 // Export setup function

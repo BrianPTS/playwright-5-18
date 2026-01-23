@@ -1,6 +1,7 @@
 import moment from "moment";
 import { Event, ConsecutiveGroup } from "../models/index.js";
 import config from "../config/scraperConfig.js";
+import { formatTimestamp } from "../utils/dateUtils.js";
 
 /**
  * Handles database operations for the scraper
@@ -54,7 +55,7 @@ class DatabaseManager {
         const currentTicketCount = scrapeResult.length;
 
         const metadata = {
-          lastUpdate: moment().format("YYYY-MM-DD HH:mm:ss"),
+          lastUpdate: formatTimestamp(),
           iterationNumber: (event.metadata?.iterationNumber || 0) + 1,
           scrapeDurationMs: performance.now() - startTime,
           ticketStats: {

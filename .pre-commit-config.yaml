@@ -1,0 +1,51 @@
+# Pre-commit Hooks for Code Deduplication
+
+repos:
+  # General code quality
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-added-large-files
+        args: ['--maxkb=500']
+      - id: check-merge-conflict
+
+  # JavaScript/Node.js specific
+  - repo: local
+    hooks:
+      # Check for duplicate date formatting patterns
+      - id: check-date-duplicates
+        name: Check for duplicate date formatting
+        entry: bash -c 'if grep -r "moment().format.*YYYY-MM-DD" --include="*.js" .; then echo "❌ Found duplicate date formatting! Use utils/dateUtils.js instead"; exit 1; fi'
+        language: system
+        types: [javascript]
+
+      # Check for duplicate logging patterns  
+      - id: check-logging-duplicates
+        name: Check for duplicate logging patterns
+        entry: bash -c 'if grep -r "console\.(log|warn|error)" --include="*.js" . | grep -v "utils/logger.js" | grep -v "// LEGACY:" | head -5; then echo "❌ Found console.log usage! Use utils/logger.js instead"; exit 1; fi'
+        language: system
+        types: [javascript]
+
+      # Check for duplicate HTTP patterns
+      - id: check-http-duplicates  
+        name: Check for duplicate HTTP patterns
+        entry: bash -c 'if grep -r "axios\|got\|fetch" --include="*.js" . | grep -v "utils/httpUtils.js" | grep -v "node_modules" | grep -E "(axios\.post|got\(|fetch\()" | head -3; then echo "❌ Found duplicate HTTP patterns! Use utils/httpUtils.js instead"; exit 1; fi'
+        language: system
+        types: [javascript]
+
+      # Check file size to prevent monolithic files
+      - id: check-file-size
+        name: Check for large files that need refactoring
+        entry: bash -c 'find . -name "*.js" -not -path "./node_modules/*" -exec wc -l {} + | awk "$1 > 1000 {print "❌ Large file: " $2 " (" $1 " lines) - consider refactoring"}" | head -5'
+        language: system
+        types: [javascript]
+
+      # Update CODE_INDEX.md when new functions are added
+      - id: update-code-index
+        name: Remind to update CODE_INDEX.md
+        entry: bash -c 'if git diff --staged --name-only | grep -E "(utils/|helpers/|services/)" | grep "\.js$"; then echo "ℹ️  Remember to update CODE_INDEX.md with new functions"; fi'
+        language: system
+        always_run: true
