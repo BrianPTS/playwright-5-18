@@ -745,11 +745,19 @@ export class ScraperManager {
             `Successfully refreshed cookies for ${eventToUse}`,
             "info"
           );
+          
+          if (cookieProxy && cookieProxy.proxy) {
+            this.proxyManager.recordProxySuccess(cookieProxy.proxy).catch(e => {});
+          }
         } catch (error) {
           this.logWithTime(
             `Cookie refresh failed for ${eventToUse} after retries: ${error.message}`,
             "warning"
           );
+          
+          if (cookieProxy && cookieProxy.proxy) {
+            this.proxyManager.recordProxyFailure(cookieProxy.proxy, error).catch(e => {});
+          }
         }
 
         // Do not refresh cookies without a proxy

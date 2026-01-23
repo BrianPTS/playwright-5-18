@@ -836,6 +836,13 @@ const ScrapeEvent = async (
       }ms (API: ${apiDuration}ms)`
     );
 
+    // Record proxy success
+    if (global.proxyManager && proxy && proxy.proxy) {
+      global.proxyManager.recordProxySuccess(proxy.proxy, apiDuration).catch(err => 
+        console.warn(`Failed to record proxy success: ${err.message}`)
+      );
+    }
+
     // If API call was too fast, it might be suspicious (rate limited or blocked)
     if (apiDuration < 100 && !result) {
       console.warn(
@@ -877,7 +884,14 @@ const ScrapeEvent = async (
     }
 
     // Release proxy with error if we have a proxy manager
+    // Also explicitly record failure for stats tracking
     if (global.proxyManager && proxy && proxy.proxy) {
+      // Record failure first to update stats
+      global.proxyManager.recordProxyFailure(proxy.proxy, error).catch(err => 
+        console.warn(`Failed to record proxy failure: ${err.message}`)
+      );
+      
+      // Then release
       global.proxyManager.releaseProxy(event?.eventId || event, false, error);
     }
 
