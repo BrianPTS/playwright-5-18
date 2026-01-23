@@ -405,11 +405,11 @@ export class ScraperManager {
   // Helper methods for background retry processor removed - using sequential processing
 
   shouldSkipEvent(eventId) {
-    // Check if event is in cooldown period
+    // Check if event is in extended cooldown period (for multi-instance setup)
     if (this.cooldownEvents.has(eventId)) {
       const cooldownUntil = this.cooldownEvents.get(eventId);
       if (moment().isBefore(cooldownUntil)) {
-        return true;
+        return true; // Skip - let other instances handle it
       } else {
         this.cooldownEvents.delete(eventId);
       }
@@ -2564,11 +2564,11 @@ export class ScraperManager {
   }
 
   /**
-   * Handle event failure with graceful backoff and natural behavior
+   * Handle event failure by skipping - no retries for multi-instance setup
    */
   async handleEventFailureGracefully(eventId) {
     try {
-      // Track failure count and timing
+      // Track failure for statistics but don't retry or delay
       const currentFailures = this.eventFailureCount.get(eventId) || 0;
       const newFailureCount = currentFailures + 1;
       const now = Date.now();
@@ -2576,53 +2576,17 @@ export class ScraperManager {
       this.eventFailureCount.set(eventId, newFailureCount);
       this.eventLastFailureTime.set(eventId, now);
 
-      // FAST FAILURE RECOVERY - Minimal delays for scraping failures
-      const baseDelay = 500; // Start with 0.5 seconds (was 2s)
-      const maxDelay = 5000; // Max 5 seconds (was 2 minutes)
-
-      // Minimal exponential backoff - fail fast, retry fast
-      let backoffDelay = Math.min(
-        maxDelay,
-        baseDelay * Math.pow(1.2, newFailureCount) // Reduced multiplier from 1.4 to 1.2
-      );
-
-      // Minimal jitter (±10%) to prevent synchronized retries
-      const jitter = backoffDelay * 0.1 * (Math.random() - 0.5); // Reduced from 30% to 10%
-      backoffDelay = Math.max(200, backoffDelay + jitter); // Minimum 200ms (was 1000ms)
-
-      // Reset failure count if it's been a while since last failure
-      const lastFailureTime = this.eventLastFailureTime.get(eventId) || 0;
-      if (now - lastFailureTime > 900000) {
-        // 15 minutes
-        this.eventFailureCount.set(eventId, 1);
-        backoffDelay = baseDelay;
-        this.logWithTime(
-          `Resetting failure count for event ${eventId} due to time gap`,
-          "info"
-        );
-      }
-
-      // Don't give up - allow more retries with longer delays
-      if (newFailureCount >= 20) {
-        this.logWithTime(
-          `Event ${eventId} has failed ${newFailureCount} times, using maximum delay but continuing`,
-          "warning"
-        );
-        backoffDelay = maxDelay;
-      }
-
       this.logWithTime(
-        `⚠️ Event ${eventId} failed (${newFailureCount} failures), backing off for ${Math.round(
-          backoffDelay / 1000
-        )}s`,
+        `⚠️ Event ${eventId} failed (${newFailureCount} failures), releasing immediately for other instances`,
         "warning"
       );
 
-      // Add to cooldown with natural timing
-      this.cooldownEvents.set(eventId, now + backoffDelay);
+      // No cooldown - let other instances pick it up immediately
+      // Natural refresh cycle will handle redistribution
+      
       this.incrementFailureCount(eventId);
 
-      // Invalidate the session for this event to force a new session on retry
+      // Invalidate the session for this event
       if (this.sessionManager) {
         this.sessionManager.invalidateSessionForEvent(eventId);
       }
