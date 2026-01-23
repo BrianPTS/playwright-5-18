@@ -2344,10 +2344,11 @@ export class ScraperManager {
 
         if (eventsToProcess.length > 0) {
           // Check if we should use parallel batch processing for high throughput
-          if (eventsToProcess.length >= 9 && consecutiveFailures === 0) {
-            // Use parallel batch processing for 9+ events with good success rate
+          // Relaxed condition: Allow parallel processing even with a few failures (< 5) to maintain speed
+          if (eventsToProcess.length >= 9 && consecutiveFailures < 5) {
+            // Use parallel batch processing for 9+ events with decent stability
             const maxParallelBatches = Math.min(
-              5,
+              10, // Increased from 5 to 10
               Math.floor(eventsToProcess.length / 3)
             ); // Increased max parallel batches
 
@@ -2510,12 +2511,12 @@ export class ScraperManager {
           let nextBatchDelay = config.PROCESSING_INTERVAL;
 
           if (batchSuccessRate < 0.2) {
-            // Very poor success rate - minimal slowdown to maintain throughput
-            nextBatchDelay = config.PROCESSING_INTERVAL * 1.3;
+            // Very poor success rate - keep delay minimal to keep trying
+            nextBatchDelay = config.PROCESSING_INTERVAL * 1.0; // Removed slowdown (was 1.3x)
             this.logWithTime(
               `Very poor success rate (${Math.round(
                 batchSuccessRate * 100
-              )}%), minimal slowdown to maintain throughput`,
+              )}%), maintaining speed to find working events`,
               "warning"
             );
           } else if (batchSuccessRate < 0.5) {
