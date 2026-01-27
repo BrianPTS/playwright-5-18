@@ -31,6 +31,11 @@ class Logger {
     this.currentLevel = process.env.LOG_LEVEL || 'info';
     this.enableFileLogging = process.env.ENABLE_FILE_LOGGING === 'true';
     this.logDirectory = process.env.LOG_DIRECTORY || './logs';
+    
+    // New environment-based controls
+    this.appLoggingEnabled = process.env.APP_LOGGING_ENABLED !== 'false';
+    this.enableAllLogs = process.env.ENABLE_ALL_LOGS === 'true';
+    this.logErrorsOnly = process.env.LOG_ERRORS_ONLY === 'true';
   }
 
   /**
@@ -41,6 +46,16 @@ class Logger {
    * @param {Object} data - Additional data to log
    */
   log(message, level = 'info', component = 'system', data = null) {
+    // Check if app logging is disabled
+    if (!this.appLoggingEnabled) {
+      return;
+    }
+    
+    // If log errors only is enabled, only show errors
+    if (this.logErrorsOnly && level !== 'error') {
+      return;
+    }
+    
     // Check if we should log this level
     if (this.logLevels[level] < this.logLevels[this.currentLevel]) {
       return;

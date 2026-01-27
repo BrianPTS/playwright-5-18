@@ -19,6 +19,7 @@ import { CookieManager } from './helpers/CookieManager.js';
 import scraperManager from './scraperManager.js';
 import CookieRefreshTracker from './helpers/CookieRefreshTracker.js';
 import seatValidator from './helpers/SeatCountValidator.js';
+import logger from './utils/logger.js';
 // Import Event model for cookie refresh
 import { Event } from './models/index.js';
 // Import functions from browser-cookies.js for legacy compatibility
@@ -30,6 +31,7 @@ import {
   cookieService
 } from './browser-cookies.js';
 
+// logger is already initialized as singleton
 // Circuit breaker for cookie refresh operations
 class CookieRefreshCircuitBreaker {
   constructor(failureThreshold = 5, resetTimeout = 300000) { // 5 failures, 5 minute reset
@@ -44,7 +46,7 @@ class CookieRefreshCircuitBreaker {
     if (this.state === 'OPEN') {
       if (Date.now() - this.lastFailureTime > this.resetTimeout) {
         this.state = 'HALF_OPEN';
-        console.log('Cookie refresh circuit breaker: Attempting to reset (HALF_OPEN)');
+        logger.debug('Cookie refresh circuit breaker: Attempting to reset (HALF_OPEN)', 'circuit-breaker');
       } else {
         throw new Error('Cookie refresh circuit breaker is OPEN - too many recent failures');
       }
@@ -72,12 +74,12 @@ class CookieRefreshCircuitBreaker {
   onFailure() {
     this.failures++;
     this.lastFailureTime = Date.now();
-    
+
     if (this.failures >= this.failureThreshold) {
       this.state = 'OPEN';
-      console.log(`Cookie refresh circuit breaker: OPENED after ${this.failures} failures`);
+      logger.debug(`Cookie refresh circuit breaker: OPENED after ${this.failures} failures`, 'circuit-breaker');
     } else {
-      console.log(`Cookie refresh circuit breaker: Failure ${this.failures}/${this.failureThreshold}`);
+      logger.debug(`Cookie refresh circuit breaker: Failure ${this.failures}/${this.failureThreshold}`, 'circuit-breaker');
     }
   }
 
@@ -105,8 +107,8 @@ const iphone13 = {
   userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1',
   viewport: { width: 390, height: 844 },
   deviceScaleFactor: 3,
-  isMobile: true,
-  hasTouch: true
+  hasTouch: true,
+  screen: { width: 390, height: 844 }
 };
 
 const COOKIES_FILE = "cookies.json";
