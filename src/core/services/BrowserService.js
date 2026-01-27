@@ -3,7 +3,7 @@
  * Following nodejs-backend patterns for clean architecture
  */
 
-import { devices, chromium } from 'patchright';
+import { Camoufox } from 'camoufox-js';
 import { BrowserFingerprint } from '../../../browserFingerprint.js';
 import { createDomainError } from '../errors/index.js';
 
@@ -25,7 +25,22 @@ export const BrowserConfig = {
   MAX_INIT_RETRIES: 3,
   RETRY_DELAY: 1000,
   
-  MOBILE_DEVICE: devices['iPhone 13'],
+  MOBILE_VIEWPORT: {
+    width: 390,
+    height: 844,
+    deviceScaleFactor: 3,
+    isMobile: true,
+    hasTouch: true
+  },
+  
+  CAMOUFOX_OPTIONS: {
+    geoip: true,
+    screen: '390x844',
+    humanize: 0.5,
+    addons: false,
+    window_size: '390x844',
+    headless: true
+  },
   
   LAUNCH_ARGS: [
     '--disable-blink-features=AutomationControlled',
@@ -239,20 +254,34 @@ export class BrowserService {
         const location = this.getRandomLocation();
         const fingerprint = this.generateEnhancedFingerprint();
         
-        // Launch browser if not already running
-        if (!this.browserInstance || !this.browserInstance.isConnected()) {
-          const launchOptions = {
-            headless: true,
-            args: BrowserConfig.LAUNCH_ARGS,
-            timeout: BrowserConfig.TIMEOUT
-          };
-          
-          this.browserInstance = await chromium.launch(launchOptions);
+        // Prepare Camoufox options
+        const camoufoxOptions = {
+          ...BrowserConfig.CAMOUFOX_OPTIONS,
+          geoip: location.locale.includes('US') ? 'US' : 'CA',
+          os: 'windows', // Use windows instead of ios
+          humanize: Math.random() * 0.5 + 0.3, // Random humanization between 0.3-0.8
+          timeout: BrowserConfig.TIMEOUT
+        };
+
+        // Add proxy if provided
+        if (proxy) {
+          const validatedProxy = this.validateProxy(proxy);
+          if (validatedProxy) {
+            // Camoufox proxy format: "http://user:pass@host:port" or "http://host:port"
+            let proxyUrl = validatedProxy.server;
+            if (validatedProxy.username && validatedProxy.password) {
+              proxyUrl = proxyUrl.replace('http://', `http://${validatedProxy.username}:${validatedProxy.password}@`);
+            }
+            camoufoxOptions.proxy = proxyUrl;
+            this.logger?.info(`Using proxy: ${proxyUrl}`);
+          }
         }
 
-        // Create context with fingerprint and proxy
+        // Launch browser using Camoufox
+        const browser = await Camoufox(camoufoxOptions);
+
+        // Create context with additional options
         const contextOptions = {
-          ...BrowserConfig.MOBILE_DEVICE,
           userAgent: this.getRealisticIphoneUserAgent(),
           locale: location.locale,
           timezoneId: location.timezone,
@@ -261,10 +290,7 @@ export class BrowserService {
             longitude: location.longitude
           },
           permissions: ['geolocation'],
-          viewport: { width: 390, height: 844 },
-          deviceScaleFactor: 3,
-          isMobile: true,
-          hasTouch: true,
+          viewport: BrowserConfig.MOBILE_VIEWPORT,
           ignoreHTTPSErrors: true,
           javaScriptEnabled: true,
           acceptDownloads: false,
@@ -282,21 +308,12 @@ export class BrowserService {
           }
         };
 
-        // Add proxy if provided
-        if (proxy) {
-          const validatedProxy = this.validateProxy(proxy);
-          if (validatedProxy) {
-            contextOptions.proxy = validatedProxy;
-            this.logger?.info(`Using proxy: ${validatedProxy.server}`);
-          }
-        }
+        const context = await browser.newContext(contextOptions);
 
-        const context = await this.browserInstance.newContext(contextOptions);
-
-        // Create page and apply stealth measures
+        // Create page 
         const page = await context.newPage();
         
-        // Apply enhanced fingerprinting
+        // Apply additional stealth measures (Camoufox already provides stealth features)
         await page.addInitScript(`
           // Override webgl fingerprinting
           Object.defineProperty(HTMLCanvasElement.prototype, 'getContext', {
@@ -327,11 +344,6 @@ export class BrowserService {
             pixelDepth: { value: ${fingerprint.screen.pixelDepth}, configurable: false }
           });
 
-          // Hide automation indicators
-          Object.defineProperty(navigator, 'webdriver', {
-            get: () => false
-          });
-
           // Override plugins
           Object.defineProperty(navigator, 'plugins', {
             get: () => ${JSON.stringify(fingerprint.plugins.map((name, i) => ({ name, filename: name, description: name, length: 0 })))},
@@ -343,7 +355,7 @@ export class BrowserService {
         page.setDefaultTimeout(BrowserConfig.TIMEOUT);
 
         const browserData = {
-          browser: this.browserInstance,
+          browser: browser,
           context,
           page,
           fingerprint,
@@ -354,7 +366,9 @@ export class BrowserService {
         const trackingId = this.trackBrowser(browserData);
         browserData.trackingId = trackingId;
 
-        this.logger?.info('Browser initialized successfully');
+        this.browserInstance = browser; // Store for future reference
+
+        this.logger?.info('Browser initialized successfully with Camoufox');
         return browserData;
 
       } catch (error) {

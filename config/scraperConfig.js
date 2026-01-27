@@ -11,14 +11,14 @@ export default {
   
   // Concurrency settings - optimized for 10,000+ events with maximum throughput
   CONCURRENT_LIMIT: Math.max(100, Math.floor(cpus().length * 12)), // Significantly increased for 10k+ events (was 50/6x)
-  BATCH_SIZE: 30, // Much larger batch size for high-volume processing
+  BATCH_SIZE: 5, // Much larger batch size for high-volume processing
   
   // Retry settings - optimized for resilience
-  MAX_RETRIES: 8, // Increased from 5 for better persistence
+  MAX_RETRIES: 8, // Incre5ased from 5 for better persistence
   RETRY_BACKOFF_MS: 3000, // Reduced base backoff (from 5000) for faster retries
   
   // Batch processing
-  CHUNK_SIZE: 100, // Chunk size for batch DB operations
+  CHUNK_SIZE: 200, // Chunk size for batch DB operations
   
   // Cookie reset settings
   COOKIE_RESET_COOLDOWN: 60 * 60 * 1000, // 1 hour between cookie resets

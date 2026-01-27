@@ -4,7 +4,6 @@ const require = createRequire(import.meta.url);
 import got from 'got';
 const { HttpsProxyAgent } = require("https-proxy-agent");
 const fs = require("fs");
-import { devices } from "patchright";
 // Removed old proxy import - now using database
 import { AttachRowSection } from "./helpers/seatBatch.js";
 import GenerateNanoPlaces from "./helpers/seats.js";
@@ -101,7 +100,14 @@ const cookieManager = new CookieManager();
 cookieManager.persistedPage = null;
 cookieManager.persistedContext = null;
 
-const iphone13 = devices["iPhone 13"];
+// iPhone 13 equivalent configuration for Camoufox
+const iphone13 = {
+  userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1',
+  viewport: { width: 390, height: 844 },
+  deviceScaleFactor: 3,
+  isMobile: true,
+  hasTouch: true
+};
 
 const COOKIES_FILE = "cookies.json";
 // Use configurations from modular services
