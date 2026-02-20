@@ -1078,22 +1078,9 @@ async function callTicketmasterAPI(facetHeader, proxyAgent, eventId, event, mapH
     }
   };
   
-  // Unified request function - uses browser API by default to bypass TLS fingerprinting
+  // Unified request function - uses browser API only, no got fallback
   const makeRequest = async (url, headers, agent, proxy = null, cookies = null) => {
-    if (USE_BROWSER_API) {
-      try {
-        return await makeBrowserRequest(url, headers, proxy, cookies);
-      } catch (browserError) {
-        // If browser request fails with non-403, fallback to got
-        if (!browserError.message?.includes('403')) {
-          console.log(`Browser API failed with non-403, trying got fallback: ${browserError.message}`);
-          return await makeGotRequest(url, headers, agent);
-        }
-        throw browserError;
-      }
-    } else {
-      return await makeGotRequest(url, headers, agent);
-    }
+    return await makeBrowserRequest(url, headers, proxy, cookies);
   };
   
   try {
