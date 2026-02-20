@@ -731,30 +731,6 @@ export class ScraperManager {
           );
         }
 
-        // If no valid state captured, try without proxy as last resort
-        if (
-          !capturedState ||
-          !capturedState.cookies ||
-          capturedState.cookies.length < MIN_VALID_COOKIES
-        ) {
-          this.logWithTime(
-            `Trying to refresh headers without proxy for ${eventToUse} (includes retry mechanism)`,
-            "warning"
-          );
-          try {
-            capturedState = await refreshHeaders(eventToUse);
-            this.logWithTime(
-              `Successfully refreshed cookies for ${eventToUse} without proxy`,
-              "info"
-            );
-          } catch (error) {
-            this.logWithTime(
-              `Cookie refresh failed for ${eventToUse} without proxy after retries: ${error.message}`,
-              "warning"
-            );
-          }
-        }
-
         if (
           capturedState &&
           capturedState.cookies &&

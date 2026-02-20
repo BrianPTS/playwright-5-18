@@ -218,8 +218,10 @@ async function initBrowser(proxy) {
           
           console.log(`Configuring browser with proxy: ${hostname}:${port}`);
         } catch (error) {
-          console.warn('Invalid proxy configuration, launching without proxy:', error);
+          throw new Error(`Invalid proxy configuration, cannot refresh cookies without proxy: ${error.message}`);
         }
+      } else {
+        throw new Error('Cannot refresh cookies without a valid proxy');
       }
 
       // Launch browser
@@ -598,6 +600,9 @@ async function loadCookiesFromFile() {
  * Get fresh cookies by opening a browser and navigating to Ticketmaster
  */
 async function refreshCookies(eventId, proxy = null) {
+  if (!proxy || !proxy.proxy) {
+    throw new Error('Cannot refresh cookies without a valid proxy');
+  }
   let retryCount = 0;
   let lastError = null;
   
