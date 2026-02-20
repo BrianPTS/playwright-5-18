@@ -121,6 +121,10 @@ class Cluster {
   
    const GenerateNanoPlaces = (data) => {
     // fs.writeFileSync("debug/datatonanPalaces.json", JSON.stringify(data));
+    if (!Array.isArray(data)) {
+      return [];
+    }
+
     let returnData = [];
     data.map(x => {
       if (x?.places && x?.places.length > 0) {

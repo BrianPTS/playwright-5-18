@@ -1,5 +1,3 @@
-// Parse raw proxy strings in format: IP:PORT:USERNAME:PASSWORD
-const rawProxies = [
   "199.160.223.167:13072:WFWYF:JHfonwdw",
   "199.160.223.168:13073:WFWYF:JHfonwdw",
   "199.160.223.169:13074:WFWYF:JHfonwdw",
@@ -1350,22 +1348,3 @@ const rawProxies = [
   "170.124.71.68:6853:X72h7:iorqUJ9J",
   "170.124.71.69:6854:X72h7:iorqUJ9J",
   "170.124.71.70:6855:X72h7:iorqUJ9J",
-];
-
-// Convert raw proxy strings to the expected format
-const proxies = rawProxies.map(rawProxy => {
-  const [ip, port, username, password] = rawProxy.split(':');
-  return {
-    proxy: `${ip}:${port}`,
-    username: username,
-    password: password
-  };
-});
-
-console.log(`[PROXY] Loaded ${proxies.length} proxies from raw format`);
-
-export default {
-  proxies: proxies
-};
-
-

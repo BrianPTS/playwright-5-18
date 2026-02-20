@@ -17,15 +17,17 @@ export class BrowserFingerprint {
   ];
 
   static browsers = [
-    // Desktop browsers
-    { name: "Chrome", version: "120.0.0.0", mobile: false },
-    { name: "Firefox", version: "121.0", mobile: false },
-    { name: "Safari", version: "17.0", mobile: false },
-    { name: "Edge", version: "119.0.0.0", mobile: false },
+    // Desktop browsers - Updated to current 2026 versions
+    { name: "Chrome", version: "133.0.0.0", mobile: false },
+    { name: "Chrome", version: "132.0.0.0", mobile: false },
+    { name: "Firefox", version: "134.0", mobile: false },
+    { name: "Safari", version: "18.3", mobile: false },
+    { name: "Edge", version: "133.0.0.0", mobile: false },
     // Mobile browsers
-    { name: "Chrome", version: "120.0.0.0", mobile: true },
-    { name: "Safari", version: "17.0", mobile: true },
-    { name: "Samsung Internet", version: "23.0.0.47", mobile: true },
+    { name: "Chrome", version: "133.0.0.0", mobile: true },
+    { name: "Chrome", version: "132.0.0.0", mobile: true },
+    { name: "Safari", version: "18.3", mobile: true },
+    { name: "Samsung Internet", version: "26.0.0.47", mobile: true },
   ];
 
   static languages = [
@@ -146,7 +148,7 @@ export class BrowserFingerprint {
   static generateUserAgent(fingerprint) {
     if (!fingerprint) {
       console.warn('No fingerprint provided, using default user agent');
-      return 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+      return 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36';
     }
 
     try {
@@ -162,7 +164,7 @@ export class BrowserFingerprint {
       }
 
       const webkitVersion = '537.36';
-      const chromeVersion = '120.0.0.0';
+      const chromeVersion = '133.0.0.0';
       const safariVersion = '537.36';
 
       // Ensure platform string is properly formatted
@@ -171,7 +173,7 @@ export class BrowserFingerprint {
       return `Mozilla/5.0 (${formattedPlatform}) AppleWebKit/${webkitVersion} (KHTML, like Gecko) Chrome/${chromeVersion} Safari/${safariVersion}`;
     } catch (error) {
       console.error('Error generating user agent:', error);
-      return 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+      return 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36';
     }
   }
 }

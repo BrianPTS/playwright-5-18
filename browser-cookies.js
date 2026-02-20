@@ -9,6 +9,12 @@ const iphone13 = devices["iPhone 13"];
 
 // Constants
 const COOKIES_FILE = "cookies.json";
+
+// Persistent browser context for API requests (bypasses TLS fingerprinting)
+let apiBrowser = null;
+let apiContext = null;
+let apiPage = null;
+let apiContextLock = false;
 const CONFIG = {
   COOKIE_REFRESH_INTERVAL: 45 * 60 * 1000, // 45 minutes
   PAGE_TIMEOUT: 90000, // 60 seconds for page operations
@@ -41,7 +47,8 @@ function getRandomLocation() {
  * Generate a realistic iPhone user agent
  */
 function getRealisticIphoneUserAgent() {
-  const iOSVersions = ['15_0', '15_1', '15_2', '15_3', '15_4', '15_5', '15_6', '16_0', '16_1', '16_2'];
+  // Updated to current iOS versions as of early 2026
+  const iOSVersions = ['18_0', '18_1', '18_2', '18_3', '19_0', '19_1', '19_2'];
   const version = iOSVersions[Math.floor(Math.random() * iOSVersions.length)];
   return `Mozilla/5.0 (iPhone; CPU iPhone OS ${version} like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/${version.split('_')[0]}.0 Mobile/15E148 Safari/604.1`;
 }
@@ -818,9 +825,252 @@ async function generateAlternativeEventId(originalEventId) {
  */
 
 /**
+ * Initialize persistent browser context for API requests
+ * This bypasses TLS fingerprinting by using real browser requests
+ */
+async function initApiBrowserContext(proxy = null, cookies = null) {
+  // If context already exists and is valid, return it
+  if (apiContext && apiBrowser && apiBrowser.isConnected()) {
+    // Update cookies if provided
+    if (cookies && cookies.length > 0) {
+      try {
+        await apiContext.clearCookies();
+        const browserCookies = cookies.map(c => ({
+          name: c.name,
+          value: c.value,
+          domain: c.domain || '.ticketmaster.com',
+          path: c.path || '/',
+          expires: c.expires || c.expiry || -1,
+          httpOnly: c.httpOnly || false,
+          secure: c.secure || true,
+          sameSite: c.sameSite || 'Lax'
+        }));
+        await apiContext.addCookies(browserCookies);
+      } catch (e) {
+        console.warn('Error updating API context cookies:', e.message);
+      }
+    }
+    return { browser: apiBrowser, context: apiContext, page: apiPage };
+  }
+
+  // Wait if context is being created
+  if (apiContextLock) {
+    await new Promise(resolve => setTimeout(resolve, 1000));
+    if (apiContext && apiBrowser && apiBrowser.isConnected()) {
+      return { browser: apiBrowser, context: apiContext, page: apiPage };
+    }
+  }
+
+  apiContextLock = true;
+
+  try {
+    const location = getRandomLocation();
+    const fingerprint = BrowserFingerprint.generate('desktop');
+    
+    const launchOptions = {
+      headless: true,
+      args: [
+        '--disable-blink-features=AutomationControlled',
+        '--disable-features=IsolateOrigins,site-per-process',
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-accelerated-2d-canvas',
+        '--disable-gpu',
+        '--window-size=1920,1080',
+        '--disable-web-security',
+        '--disable-features=IsolateOrigins',
+        '--disable-site-isolation-trials',
+      ],
+    };
+
+    // Configure proxy if provided
+    if (proxy) {
+      try {
+        let proxyString = proxy.proxy || proxy;
+        if (typeof proxyString !== 'string') {
+          throw new Error('Invalid proxy format');
+        }
+        
+        const [hostname, portStr] = proxyString.split(':');
+        const port = parseInt(portStr) || 80;
+        
+        launchOptions.proxy = {
+          server: `http://${hostname}:${port}`,
+          username: proxy.username,
+          password: proxy.password,
+        };
+      } catch (error) {
+        console.warn('Invalid proxy for API context:', error.message);
+      }
+    }
+
+    // Launch browser for API requests
+    apiBrowser = await chromium.launch(launchOptions);
+    
+    // Create desktop context (better for API requests)
+    apiContext = await apiBrowser.newContext({
+      userAgent: `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36`,
+      locale: location.locale,
+      timezoneId: location.timezone,
+      viewport: { width: 1920, height: 1080 },
+      deviceScaleFactor: 1,
+      hasTouch: false,
+      isMobile: false,
+      javaScriptEnabled: true,
+      ignoreHTTPSErrors: true,
+      extraHTTPHeaders: {
+        'Accept': 'application/json, text/plain, */*',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'Cache-Control': 'no-cache',
+        'Pragma': 'no-cache',
+      }
+    });
+
+    // Add cookies if provided
+    if (cookies && cookies.length > 0) {
+      const browserCookies = cookies.map(c => ({
+        name: c.name,
+        value: c.value,
+        domain: c.domain || '.ticketmaster.com',
+        path: c.path || '/',
+        expires: c.expires || c.expiry || -1,
+        httpOnly: c.httpOnly || false,
+        secure: c.secure || true,
+        sameSite: c.sameSite || 'Lax'
+      }));
+      await apiContext.addCookies(browserCookies);
+    }
+
+    // Create a page for requests
+    apiPage = await apiContext.newPage();
+    
+    // Navigate to ticketmaster initially to establish session
+    try {
+      await apiPage.goto('https://www.ticketmaster.com/', { 
+        waitUntil: 'domcontentloaded',
+        timeout: 30000 
+      });
+      await new Promise(r => setTimeout(r, 1000));
+    } catch (e) {
+      console.warn('Initial TM navigation warning:', e.message);
+    }
+
+    console.log('API browser context initialized successfully');
+    return { browser: apiBrowser, context: apiContext, page: apiPage };
+    
+  } catch (error) {
+    console.error('Failed to initialize API browser context:', error.message);
+    await cleanupApiBrowser();
+    throw error;
+  } finally {
+    apiContextLock = false;
+  }
+}
+
+/**
+ * Make an API request through the browser context (bypasses TLS fingerprinting)
+ * @param {string} url - The URL to fetch
+ * @param {object} headers - Request headers
+ * @param {object} proxy - Proxy configuration
+ * @param {array} cookies - Cookies to use
+ * @returns {Promise<object>} Response data
+ */
+async function browserApiRequest(url, headers = {}, proxy = null, cookies = null) {
+  try {
+    // Initialize or get existing API context
+    const { page, context } = await initApiBrowserContext(proxy, cookies);
+    
+    if (!page || !context) {
+      throw new Error('Failed to get API browser context');
+    }
+
+    // Make request using page.evaluate with fetch (uses browser's TLS stack)
+    const result = await page.evaluate(async ({ url, headers }) => {
+      try {
+        const response = await fetch(url, {
+          method: 'GET',
+          headers: headers,
+          credentials: 'include',
+          mode: 'cors',
+        });
+        
+        const status = response.status;
+        const statusText = response.statusText;
+        
+        if (!response.ok) {
+          return { 
+            success: false, 
+            status, 
+            statusText,
+            error: `HTTP ${status}: ${statusText}` 
+          };
+        }
+        
+        const data = await response.json();
+        return { success: true, data, status };
+        
+      } catch (error) {
+        return { 
+          success: false, 
+          error: error.message,
+          status: 0 
+        };
+      }
+    }, { url, headers });
+
+    if (!result.success) {
+      const error = new Error(result.error || `Request failed with status ${result.status}`);
+      error.statusCode = result.status;
+      throw error;
+    }
+
+    return result.data;
+    
+  } catch (error) {
+    // If browser context fails, try to reinitialize
+    if (error.message?.includes('Target closed') || error.message?.includes('Browser')) {
+      await cleanupApiBrowser();
+    }
+    throw error;
+  }
+}
+
+/**
+ * Clean up API browser resources
+ */
+async function cleanupApiBrowser() {
+  try {
+    if (apiPage) {
+      await apiPage.close().catch(() => {});
+      apiPage = null;
+    }
+    if (apiContext) {
+      await apiContext.close().catch(() => {});
+      apiContext = null;
+    }
+    if (apiBrowser) {
+      await apiBrowser.close().catch(() => {});
+      apiBrowser = null;
+    }
+  } catch (error) {
+    console.warn('Error cleaning up API browser:', error.message);
+  }
+}
+
+/**
+ * Check if API browser context is available
+ */
+function isApiBrowserAvailable() {
+  return apiBrowser && apiBrowser.isConnected() && apiContext && apiPage;
+}
+
+/**
  * Clean up browser resources
  */
 async function cleanup() {
+  // Clean up main browser
   if (browser) {
     try {
       await browser.close();
@@ -829,6 +1079,9 @@ async function cleanup() {
       console.warn("Error closing browser:", error.message);
     }
   }
+  
+  // Clean up API browser
+  await cleanupApiBrowser();
 }
 
 export {
@@ -844,5 +1097,10 @@ export {
   getRandomLocation,
   getRealisticIphoneUserAgent,
   generateAlternativeEventId,
-  simulateMobileInteractions
+  simulateMobileInteractions,
+  // Browser-based API functions (bypass TLS fingerprinting)
+  initApiBrowserContext,
+  browserApiRequest,
+  cleanupApiBrowser,
+  isApiBrowserAvailable
 };

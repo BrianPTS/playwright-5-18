@@ -22,7 +22,15 @@ import seatValidator from './helpers/SeatCountValidator.js';
 import {
   refreshCookies,
   loadCookiesFromFile,
-  getRealisticIphoneUserAgent} from './browser-cookies.js';
+  getRealisticIphoneUserAgent,
+  browserApiRequest,
+  initApiBrowserContext,
+  isApiBrowserAvailable,
+  cleanupApiBrowser
+} from './browser-cookies.js';
+
+// Flag to control whether to use browser-based API requests (bypasses TLS fingerprinting)
+const USE_BROWSER_API = true;
 
 // Circuit breaker for cookie refresh operations
 class CookieRefreshCircuitBreaker {
@@ -682,6 +690,7 @@ const ScrapeEvent = async (
     const startTime = Date.now();
     const correlationId = generateCorrelationId();
     let cookieString, userAgent, fingerprint;
+    let capturedCookies = []; // Store raw cookies for browser-based API requests
     let useProvidedHeaders = false;
 
     // Ensure we have a valid event ID
@@ -828,6 +837,9 @@ const ScrapeEvent = async (
           throw new Error("Failed to capture cookies");
         }
 
+        // Store cookies for browser-based API requests
+        capturedCookies = capturedData.cookies;
+
         cookieString = capturedData.cookies
           .map((cookie) => `${cookie.name}=${cookie.value}`)
           .join("; ");
@@ -893,7 +905,9 @@ const ScrapeEvent = async (
       eventId,
       event,
       MapHeader,
-      startTime
+      startTime,
+      proxy, // Pass proxy data for browser-based requests
+      capturedCookies // Pass raw cookies for browser-based requests
     );
     const apiDuration = Date.now() - apiStartTime;
 
@@ -953,7 +967,7 @@ const ScrapeEvent = async (
 };
 
 // Simplified API call without retry logic
-async function callTicketmasterAPI(facetHeader, proxyAgent, eventId, event, mapHeader = null, startTime) {
+async function callTicketmasterAPI(facetHeader, proxyAgent, eventId, event, mapHeader = null, startTime, proxyData = null, cookiesArray = null) {
   // Add a fallback for startTime if not provided
   startTime = startTime || Date.now();
   
@@ -991,8 +1005,46 @@ async function callTicketmasterAPI(facetHeader, proxyAgent, eventId, event, mapH
     await delay(dynamicDelay);
   }
   
-  // Simple request function without retries
-  const makeRequest = async (url, headers, agent) => {
+  // Browser-based request function (bypasses TLS fingerprinting)
+  const makeBrowserRequest = async (url, headers, proxy, cookies) => {
+    try {
+      // Add minimal delay for natural behavior
+      await delay(50 + Math.random() * 100);
+      
+      // Filter headers for browser fetch compatibility
+      const browserHeaders = {};
+      const allowedHeaders = [
+        'Accept', 'Accept-Language', 'Cache-Control', 'Pragma', 
+        'X-Api-Key', 'X-Request-ID', 'X-Correlation-ID', 'tmps-correlation-id'
+      ];
+      
+      for (const [key, value] of Object.entries(headers)) {
+        // Skip headers that browsers handle automatically or that cause issues
+        if (key.toLowerCase().startsWith('sec-') || 
+            key.toLowerCase() === 'user-agent' ||
+            key.toLowerCase() === 'cookie' ||
+            key.toLowerCase() === 'connection' ||
+            key.toLowerCase() === 'host') {
+          continue;
+        }
+        if (typeof value === 'string' && allowedHeaders.some(h => h.toLowerCase() === key.toLowerCase())) {
+          browserHeaders[key] = value;
+        }
+      }
+      
+      const result = await browserApiRequest(url, browserHeaders, proxy, cookies);
+      return { body: result };
+      
+    } catch (error) {
+      // Re-throw with status code for consistent error handling
+      const newError = new Error(`Response code ${error.statusCode || 0} (${error.message})`);
+      newError.response = { statusCode: error.statusCode || 0 };
+      throw newError;
+    }
+  };
+  
+  // Simple request function without retries (fallback using got)
+  const makeGotRequest = async (url, headers, agent) => {
     try {
       // Add minimal delay for natural behavior
       await delay(10 + Math.random() * 40);
@@ -1023,6 +1075,24 @@ async function callTicketmasterAPI(facetHeader, proxyAgent, eventId, event, mapH
     } catch (error) {
       // Just throw the error, no retry logic
       throw error;
+    }
+  };
+  
+  // Unified request function - uses browser API by default to bypass TLS fingerprinting
+  const makeRequest = async (url, headers, agent, proxy = null, cookies = null) => {
+    if (USE_BROWSER_API) {
+      try {
+        return await makeBrowserRequest(url, headers, proxy, cookies);
+      } catch (browserError) {
+        // If browser request fails with non-403, fallback to got
+        if (!browserError.message?.includes('403')) {
+          console.log(`Browser API failed with non-403, trying got fallback: ${browserError.message}`);
+          return await makeGotRequest(url, headers, agent);
+        }
+        throw browserError;
+      }
+    } else {
+      return await makeGotRequest(url, headers, agent);
     }
   };
   
@@ -1059,9 +1129,12 @@ async function callTicketmasterAPI(facetHeader, proxyAgent, eventId, event, mapH
     // Make single attempts at both API calls
     let DataMap, DataFacets;
     
+    // Parse cookies from header for browser-based requests
+    const cookies = cookiesArray || [];
+    
     // Try map API
     try {
-      const mapResponse = await makeRequest(mapUrlWithParams, safeMapHeader || safeFacetHeader, proxyAgent);
+      const mapResponse = await makeRequest(mapUrlWithParams, safeMapHeader || safeFacetHeader, proxyAgent, proxyData, cookies);
       DataMap = mapResponse.body || mapResponse;
     } catch (mapError) {
       console.log(`Map API failed for event ${eventId}: ${mapError.message}`);
@@ -1073,7 +1146,7 @@ async function callTicketmasterAPI(facetHeader, proxyAgent, eventId, event, mapH
     
     // Try facet API
     try {
-      const facetResponse = await makeRequest(facetUrlWithParams, safeFacetHeader, proxyAgent);
+      const facetResponse = await makeRequest(facetUrlWithParams, safeFacetHeader, proxyAgent, proxyData, cookies);
       DataFacets = facetResponse.body || facetResponse;
     } catch (facetError) {
       console.log(`Facet API failed for event ${eventId}: ${facetError.message}`);
@@ -1559,23 +1632,23 @@ function generateRealisticUserAgent(browserName, platformName) {
   const platform = platformName || 'Windows';
   const userAgents = {
     'Chrome': [
-      `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36`,
-      `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36`,
-      `Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36`,
-      `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36`
+      `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36`,
+      `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36`,
+      `Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36`,
+      `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36`
     ],
     'Firefox': [
-      `Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0`,
-      `Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:121.0) Gecko/20100101 Firefox/121.0`,
-      `Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:120.0) Gecko/20100101 Firefox/120.0`
+      `Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:134.0) Gecko/20100101 Firefox/134.0`,
+      `Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:134.0) Gecko/20100101 Firefox/134.0`,
+      `Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:133.0) Gecko/20100101 Firefox/133.0`
     ],
     'Edge': [
-      `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0`,
-      `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36 Edg/119.0.0.0`
+      `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36 Edg/133.0.0.0`,
+      `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36 Edg/132.0.0.0`
     ],
     'Safari': [
-      `Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15`,
-      `Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Safari/605.1.15`
+      `Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.3 Safari/605.1.15`,
+      `Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.2 Safari/605.1.15`
     ]
   };
   
@@ -1585,10 +1658,10 @@ function generateRealisticUserAgent(browserName, platformName) {
 
 function getLatestBrowserVersion(browserName) {
   const versions = {
-    'Chrome': '121.0.6167.85',
-    'Firefox': '121.0',
-    'Edge': '121.0.2277.83',
-    'Safari': '17.1'
+    'Chrome': '133.0.6943.98',
+    'Firefox': '134.0',
+    'Edge': '133.0.3065.59',
+    'Safari': '18.3'
   };
   return versions[browserName] || versions['Chrome'];
 }
@@ -1704,14 +1777,14 @@ function generateRequestId() {
 
 function generateFallbackHeaders(cookies) {
   return {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36',
     'Accept': 'application/json, text/plain, */*',
     'Accept-Language': 'en-US,en;q=0.9',
     'Accept-Encoding': 'gzip, deflate, br',
     'Connection': 'keep-alive',
     'Referer': 'https://www.ticketmaster.com/',
     'Origin': 'https://www.ticketmaster.com',
-    'sec-ch-ua': '"Not_A Brand";v="8", "Chromium";v="121", "Google Chrome";v="121"',
+    'sec-ch-ua': '"Not_A Brand";v="8", "Chromium";v="133", "Google Chrome";v="133"',
     'sec-ch-ua-mobile': '?0',
     'sec-ch-ua-platform': '"Windows"',
     'Sec-Fetch-Dest': 'empty',
@@ -1979,7 +2052,7 @@ const HeaderValidator = {
     
     // Ensure User-Agent exists
     if (!fixed['User-Agent']) {
-      fixed['User-Agent'] = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36';
+      fixed['User-Agent'] = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36';
     }
     
     // Ensure Accept header exists
