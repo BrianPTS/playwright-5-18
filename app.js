@@ -16,6 +16,7 @@ import adminRoutes from "./routes/adminRoutes.js";
 // Import global setup
 import setupGlobals from "./setup.js";
 import scraperManager from "./scraperManager.js"; // Added for command-line start and graceful shutdown
+import { cleanup as cleanupBrowsers, cleanupApiBrowser } from "./browser-cookies.js";
 
 dotenv.config();
 
@@ -123,23 +124,50 @@ function startServerWithPortFallback(currentPort, attempt = 0, maxAttempts = 20)
 // Start server
 startServerWithPortFallback(initialPort);
 
-// Graceful shutdown
-process.on("SIGTERM", async () => {
-  console.log("SIGTERM received. Starting graceful shutdown...");
+// Graceful shutdown handler - shared between SIGTERM and SIGINT
+let isShuttingDown = false;
 
-  // Stop the scraper
-  if (scraperManager && typeof scraperManager.stop === 'function') {
+async function gracefulShutdown(signal) {
+  if (isShuttingDown) {
+    console.log(`${signal}: Shutdown already in progress, skipping...`);
+    return;
+  }
+  isShuttingDown = true;
+  console.log(`${signal} received. Starting graceful shutdown...`);
+
+  // 1. Stop the scraper first (prevents new browser launches)
+  if (scraperManager && typeof scraperManager.stopContinuousScraping === 'function') {
     try {
-      console.log("Attempting to stop scraper gracefully...");
-      await scraperManager.stop();
+      console.log("Stopping scraper...");
+      await scraperManager.stopContinuousScraping();
       console.log("Scraper stopped successfully.");
     } catch (error) {
       console.error("Error during scraper stop:", error);
     }
-  } else {
-    console.log("Scraper manager not found or stop method is unavailable. Skipping scraper stop.");
   }
 
+  // 2. Close all open browser instances (main + API browsers)
+  try {
+    console.log("Closing all browser instances...");
+    await Promise.race([
+      cleanupBrowsers(),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('Browser cleanup timeout')), 10000)),
+    ]);
+    console.log("All browser instances closed successfully.");
+  } catch (error) {
+    console.error("Error closing browsers (force killing):", error.message);
+    // Force kill any remaining chromium processes on Windows
+    try {
+      const { execSync } = await import('child_process');
+      execSync('taskkill /F /IM chromium.exe /T 2>nul', { stdio: 'ignore' });
+      execSync('taskkill /F /IM chrome.exe /T 2>nul', { stdio: 'ignore' });
+      console.log("Force killed remaining browser processes.");
+    } catch {
+      // No processes to kill, that's fine
+    }
+  }
+
+  // 3. Close HTTP server
   const closeDbAndExit = async (serverError) => {
     console.log("Closing database connections...");
     try {
@@ -166,6 +194,31 @@ process.on("SIGTERM", async () => {
     console.log("HTTP server was not started or already closed. Proceeding to close database.");
     await closeDbAndExit(null);
   }
+
+  // Safety: force exit after 15 seconds if graceful shutdown hangs
+  setTimeout(() => {
+    console.error("Graceful shutdown timed out after 15s. Force exiting.");
+    process.exit(1);
+  }, 15000).unref();
+}
+
+// PM2 sends SIGINT on restart, SIGTERM on stop
+process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
+process.on("SIGINT", () => gracefulShutdown("SIGINT"));
+
+// Safety net: clean up browsers on uncaught errors before crashing
+process.on("uncaughtException", async (error) => {
+  console.error("Uncaught exception:", error);
+  try {
+    await cleanupBrowsers();
+  } catch {
+    // Best effort
+  }
+  process.exit(1);
+});
+
+process.on("unhandledRejection", (reason) => {
+  console.error("Unhandled rejection:", reason);
 });
 
 export default app;

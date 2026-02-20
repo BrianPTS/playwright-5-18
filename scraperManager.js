@@ -13,6 +13,7 @@ import pThrottle from 'p-throttle';
 import config from './config/scraperConfig.js';
 import _ from 'lodash';
 import InventoryApi from './utils/inventoryApi.js';
+import { cleanup as cleanupBrowsers } from './browser-cookies.js';
 // CSV upload functionality removed
 let inventoryIdCounter = 0;
 
@@ -119,7 +120,7 @@ const COOKIE_MANAGEMENT = {
 export class ScraperManager {
   constructor() {
     this.startTime = moment();
-    this.lastSuccessTime = null;
+    this.lastSuccessTime = moment(); // Initialize to now to avoid false stall detection on startup
     this.successCount = 0;
     this.activeJobs = new Map();
     this.failedEvents = new Set(); // Kept for tracking purposes only, no retry logic
@@ -164,9 +165,9 @@ export class ScraperManager {
     this.eventPriorityScores = new Map(); // Cache priority scores
     this.eventMaxRetries = new Map(); // Track dynamic retry limits per event
 
-    // Enhanced throttled ScrapeEvent for high-volume concurrent processing
+    // Enhanced throttled ScrapeEvent for parallel processing
     this.throttledScrapeEvent = pThrottle({
-      limit: config.CONCURRENT_LIMIT, // Use config value (50+ concurrent for 10k+ events)
+      limit: config.CONCURRENT_LIMIT, // 5 concurrent scrapes
       interval: 100, // Minimal interval for maximum throughput
       strict: false, // Allow bursts for better throughput
     })(ScrapeEvent);
@@ -315,7 +316,7 @@ export class ScraperManager {
 
       // Start concurrent event processing
       this.logWithTime(
-        "Started concurrent event processing with enhanced throughput",
+        `Started parallel event processing (${config.CONCURRENT_LIMIT} concurrent, batch size ${config.BATCH_SIZE})`,
         "success"
       );
 
@@ -388,6 +389,33 @@ export class ScraperManager {
       // ALWAYS use random event IDs for cookie refresh, never the original eventId
       let eventToUse;
 
+      // Use a cached pool of random event IDs to avoid DB aggregate on every call
+      if (!this._randomEventPool || this._randomEventPool.length === 0 || 
+          !this._randomEventPoolTime || Date.now() - this._randomEventPoolTime > 60000) {
+        // Refresh pool every 60 seconds or when empty
+        try {
+          const poolEvents = await Event.aggregate([
+            { $match: { Skip_Scraping: { $ne: true }, url: { $exists: true, $ne: "" } } },
+            { $sample: { size: 50 } },
+            { $project: { Event_ID: 1 } },
+          ]);
+          if (poolEvents && poolEvents.length > 0) {
+            this._randomEventPool = poolEvents.map(e => e.Event_ID);
+            this._randomEventPoolTime = Date.now();
+          }
+        } catch (poolError) {
+          this.logWithTime(`Error refreshing random event pool: ${poolError.message}`, "warning");
+        }
+      }
+
+      // Pick from cached pool
+      if (this._randomEventPool && this._randomEventPool.length > 0) {
+        const idx = Math.floor(Math.random() * this._randomEventPool.length);
+        eventToUse = this._randomEventPool[idx];
+      }
+
+      // Fallback if pool is empty
+      if (!eventToUse) {
       // Try multiple ways to get random event IDs to ensure we always get one
       try {
         // First attempt: Get multiple random active events from the database
@@ -398,12 +426,11 @@ export class ScraperManager {
               url: { $exists: true, $ne: "" },
             },
           },
-          { $sample: { size: 20 } }, // Increased to 20 for even more diversity
+          { $sample: { size: 20 } },
           { $project: { Event_ID: 1, url: 1 } },
         ]);
 
         if (randomEvents && randomEvents.length > 0) {
-          // Select a truly random event (not timestamp-based) for better cookie diversity
           const randomIndex = Math.floor(Math.random() * randomEvents.length);
           const selectedEvent = randomEvents[randomIndex];
           eventToUse = selectedEvent.Event_ID;
@@ -577,6 +604,7 @@ export class ScraperManager {
           );
         }
       }
+      } // end fallback if pool empty
 
       const eventDoc = await Event.findOne({ Event_ID: eventToUse })
         .select("url")
@@ -1792,6 +1820,15 @@ export class ScraperManager {
     // Release any active proxies
     this.proxyManager.releaseAllProxies();
 
+    // Close all open browser instances
+    try {
+      this.logWithTime("Closing browser instances...", "info");
+      await cleanupBrowsers();
+      this.logWithTime("Browser instances closed", "success");
+    } catch (error) {
+      this.logWithTime(`Error closing browsers: ${error.message}`, "error");
+    }
+
     // Clear all processing queues
     this.eventProcessingQueue = [];
     this.processingEvents.clear();
@@ -2253,14 +2290,13 @@ export class ScraperManager {
   // Helper method for retry events removed
 
   /**
-   * Start concurrent processing of events with natural behavior patterns
+   * Start parallel processing of events to update all within 3 minutes
    */
   async startConcurrentProcessing() {
     let consecutiveFailures = 0;
-    let lastSuccessfulBatch = Date.now();
     let circuitBreakerOpen = false;
     let circuitBreakerOpenTime = 0;
-    const CIRCUIT_BREAKER_THRESHOLD = 8; // Open circuit after 8 consecutive failures
+    const CIRCUIT_BREAKER_THRESHOLD = 15; // Higher threshold for parallel mode
     const CIRCUIT_BREAKER_TIMEOUT = 10000; // 10 seconds before trying again
 
     while (this.isRunning) {
@@ -2270,9 +2306,8 @@ export class ScraperManager {
           if (Date.now() - circuitBreakerOpenTime > CIRCUIT_BREAKER_TIMEOUT) {
             circuitBreakerOpen = false;
             consecutiveFailures = 0;
-            this.logWithTime("Circuit breaker reset - resuming normal processing", "success");
+            this.logWithTime("Circuit breaker reset - resuming processing", "success");
           } else {
-            // Wait briefly and continue to next iteration
             await setTimeout(2000);
             continue;
           }
@@ -2293,197 +2328,101 @@ export class ScraperManager {
         const eventsToProcess = await this.getEvents();
 
         if (eventsToProcess.length > 0) {
-          // Check if we should use parallel batch processing for high throughput
-          if (eventsToProcess.length >= 9 && consecutiveFailures === 0) {
-            // Use parallel batch processing for 9+ events with good success rate
-            const maxParallelBatches = Math.min(
-              5,
-              Math.floor(eventsToProcess.length / 3)
-            ); // Increased max parallel batches
-
-            this.logWithTime(
-              `Using parallel batch processing for ${eventsToProcess.length} events`,
-              "info"
-            );
-
-            const parallelResult = await this.processMultipleBatches(
-              eventsToProcess,
-              maxParallelBatches
-            );
-
-            if (parallelResult) {
-              // Update tracking based on parallel processing results
-              if (parallelResult.successRate > 0.6) {
-                consecutiveFailures = 0;
-                lastSuccessfulBatch = Date.now();
-              } else {
-                // Don't increment failures as aggressively for parallel processing
-                consecutiveFailures = Math.min(consecutiveFailures + 1, 2);
-              }
-
-              // Process remaining events if any
-              if (
-                parallelResult.remainingEvents &&
-                parallelResult.remainingEvents.length > 0
-              ) {
-                this.logWithTime(
-                  `${parallelResult.remainingEvents.length} events remaining for next cycle`,
-                  "info"
-                );
-              }
-
-              // Failure-resistant delay after parallel processing
-              const parallelDelay =
-                parallelResult.successRate > 0.5 ? 200 : 400;
-              await setTimeout(parallelDelay + Math.random() * 100);
-              continue; // Skip regular batch processing
-            }
-          }
-
-          // Regular batch processing for smaller numbers or when parallel processing isn't suitable
-          const optimalBatchSize = 5; // Increased optimal batch size for better throughput
-          let batchSize = Math.min(optimalBatchSize, eventsToProcess.length);
-
-          // Failure-resistant batch sizing - maintain throughput during failures
-          if (consecutiveFailures > 3) {
-            // Only slightly reduce batch size, maintain minimum of 3 for efficiency
-            batchSize = Math.max(3, Math.floor(optimalBatchSize * 0.8));
-            this.logWithTime(
-              `Slightly reducing batch size to ${batchSize} due to failures (maintaining throughput)`,
-              "warning"
-            );
-          } else if (consecutiveFailures === 0 && eventsToProcess.length >= 6) {
-            // Increase to 8 events if we're doing well and have many events
-            batchSize = Math.min(8, eventsToProcess.length);
-            this.logWithTime(
-              `Increasing batch size to ${batchSize} for better throughput`,
-              "info"
-            );
-          }
-
-          const batch = eventsToProcess.slice(0, batchSize);
-
-          this.logWithTime(
-            `Processing regular batch of ${batch.length} events (${eventsToProcess.length} total available)`,
-            "info"
+          // Filter out already-processing events
+          const availableEvents = eventsToProcess.filter(
+            (id) => !this.processingEvents.has(id)
           );
 
-          // Optimized jitter for fast batch processing
-          const jitterDelay = Math.random() * 500; // Reduced to 0-500ms for faster processing
-          await setTimeout(jitterDelay);
-
-          // Process batch with optimized staggered starts for 3-event batches
-          const processingPromises = batch.map(async (eventId, index) => {
-            if (this.processingEvents.has(eventId)) {
-              return null; // Skip if already processing
+          if (availableEvents.length > 0) {
+            // Split into batches of BATCH_SIZE for parallel processing
+            const batchSize = config.BATCH_SIZE;
+            const batches = [];
+            for (let i = 0; i < availableEvents.length; i += batchSize) {
+              batches.push(availableEvents.slice(i, i + batchSize));
             }
 
-            // Optimized stagger timing for fast batch processing
-            let staggerDelay = 0;
-            if (batchSize <= 3) {
-              // For 3 or fewer events, minimal stagger (50-150ms)
-              staggerDelay = index * (50 + Math.random() * 100);
-            } else {
-              // For larger batches, slightly more stagger (100-300ms)
-              staggerDelay = index * (100 + Math.random() * 200);
-            }
-            await setTimeout(staggerDelay);
+            this.logWithTime(
+              `Processing ${availableEvents.length} events in ${batches.length} batches of ${batchSize} (parallel)`,
+              "info"
+            );
 
-            try {
-              this.processingEvents.add(eventId);
+            // Process batches - run each batch in parallel, batches sequentially
+            for (const batch of batches) {
+              if (!this.isRunning) break;
 
-              // Add processing timeout to prevent stuck events
-              const processingTimeout = config.SCRAPE_TIMEOUT + 10000; // Extra 10s buffer
+              const batchResults = await Promise.allSettled(
+                batch.map(async (eventId) => {
+                  if (this.processingEvents.has(eventId)) return null;
+                  this.processingEvents.add(eventId);
 
-              const result = await Promise.race([
-                this.scrapeEventWithNaturalBehavior(eventId),
-                setTimeout(processingTimeout).then(() => {
-                  throw new Error(
-                    `Processing timeout after ${processingTimeout}ms`
-                  );
-                }),
-              ]);
-
-              if (result) {
-                this.eventLastProcessedTime.set(eventId, Date.now());
-                this.resetEventFailureTracking(eventId);
-                this.logWithTime(
-                  `✅ Successfully processed event ${eventId}`,
-                  "success"
-                );
-                return { eventId, success: true };
-              } else {
-                await this.handleEventFailureGracefully(eventId);
-                return { eventId, success: false };
-              }
-            } catch (error) {
-              this.logWithTime(
-                `❌ Error processing event ${eventId}: ${error.message}`,
-                "error"
+                  try {
+                    const processingTimeout = config.SCRAPE_TIMEOUT + 10000;
+                    const result = await Promise.race([
+                      this.scrapeEventWithNaturalBehavior(eventId),
+                      setTimeout(processingTimeout).then(() => {
+                        throw new Error(`Processing timeout after ${processingTimeout}ms`);
+                      }),
+                    ]);
+                    return { eventId, success: !!result, result };
+                  } catch (error) {
+                    return { eventId, success: false, error: error.message };
+                  } finally {
+                    this.processingEvents.delete(eventId);
+                  }
+                })
               );
-              await this.handleEventFailureGracefully(eventId);
-              return { eventId, success: false, error: error.message };
-            } finally {
-              this.processingEvents.delete(eventId);
 
-              // Optimized post-processing delay for fast batches
-              if (batchSize <= 3) {
-                // Minimal delay for small batches (25-75ms)
-                await setTimeout(25 + Math.random() * 50);
-              } else {
-                // Standard delay for larger batches (50-100ms)
-                await setTimeout(50 + Math.random() * 50);
+              // Process results
+              for (const settledResult of batchResults) {
+                if (settledResult.status === "fulfilled" && settledResult.value) {
+                  const { eventId, success, error } = settledResult.value;
+                  if (success) {
+                    this.eventLastProcessedTime.set(eventId, Date.now());
+                    this.resetEventFailureTracking(eventId);
+                    consecutiveFailures = 0;
+                  } else {
+                    if (error) {
+                      this.logWithTime(`❌ Error processing event ${eventId}: ${error}`, "error");
+                    }
+                    await this.handleEventFailureGracefully(eventId);
+                    consecutiveFailures++;
+                  }
+                } else if (settledResult.status === "rejected") {
+                  consecutiveFailures++;
+                }
+              }
+
+              // Small stagger delay between batches
+              if (batches.indexOf(batch) < batches.length - 1) {
+                await setTimeout(100 + Math.random() * 100);
+              }
+
+              // Break if circuit breaker should open
+              if (consecutiveFailures >= CIRCUIT_BREAKER_THRESHOLD) {
+                this.logWithTime(
+                  `Too many failures (${consecutiveFailures}), opening circuit breaker`,
+                  "warning"
+                );
+                break;
               }
             }
-          });
-
-          // Wait for all concurrent operations to complete
-          const results = await Promise.allSettled(processingPromises);
-
-          // Analyze batch results for adaptive behavior
-          const successfulResults = results.filter(
-            (r) => r.status === "fulfilled" && r.value?.success
-          ).length;
-
-          const batchSuccessRate = successfulResults / batch.length;
-
-          if (batchSuccessRate > 0.7) {
-            consecutiveFailures = 0;
-            lastSuccessfulBatch = Date.now();
-          } else {
-            consecutiveFailures++;
           }
 
-          // Failure-resistant adaptive delay - maintain speed during failures
-          let nextBatchDelay = config.PROCESSING_INTERVAL;
+          // Adaptive delay between processing cycles
+          let nextCycleDelay = config.PROCESSING_INTERVAL;
 
-          if (batchSuccessRate < 0.2) {
-            // Very poor success rate - minimal slowdown to maintain throughput
-            nextBatchDelay = config.PROCESSING_INTERVAL * 1.3;
+          if (consecutiveFailures > 3) {
+            nextCycleDelay = config.PROCESSING_INTERVAL * 2;
             this.logWithTime(
-              `Very poor success rate (${Math.round(
-                batchSuccessRate * 100
-              )}%), minimal slowdown to maintain throughput`,
+              `Slowing down due to ${consecutiveFailures} failures`,
               "warning"
             );
-          } else if (batchSuccessRate < 0.5) {
-            // Moderate success rate - slight adjustment only
-            nextBatchDelay = config.PROCESSING_INTERVAL * 1.1;
-          } else if (batchSuccessRate >= 0.7) {
-            // Good success rate - speed up processing
-            nextBatchDelay = Math.max(150, config.PROCESSING_INTERVAL * 0.6);
-            this.logWithTime(
-              `Good success rate (${Math.round(
-                batchSuccessRate * 100
-              )}%), speeding up batch processing`,
-              "success"
-            );
+          } else if (consecutiveFailures === 0) {
+            nextCycleDelay = Math.max(50, config.PROCESSING_INTERVAL * 0.5);
           }
 
-          // Minimal jitter for consistent high throughput
-          nextBatchDelay += Math.random() * 150;
-
-          await setTimeout(nextBatchDelay);
+          nextCycleDelay += Math.random() * 50;
+          await setTimeout(nextCycleDelay);
         } else {
           // No events to process, wait before checking again
           await setTimeout(
@@ -2491,16 +2430,7 @@ export class ScraperManager {
           );
         }
 
-        // Emergency slowdown if no successful batches for too long
-        if (Date.now() - lastSuccessfulBatch > 300000) {
-          // 5 minutes
-          this.logWithTime(
-            "No successful batches for 5 minutes, implementing emergency slowdown",
-            "error"
-          );
-          await setTimeout(10000); // 10 second pause
-          consecutiveFailures = Math.max(consecutiveFailures, 5);
-        }
+        // Emergency slowdown removed - multiple instances handle redundancy
       } catch (error) {
         this.logWithTime(
           `Concurrent processing error: ${error.message}`,
@@ -2660,139 +2590,118 @@ export class ScraperManager {
     }
   }
 
-  // processEventBatch method removed - using sequential processing
+  // processEventBatch method removed - using parallel batch processing
 
   /**
-   * Process multiple batches of 3 events in parallel for maximum throughput
+   * Process multiple batches of events in parallel for maximum throughput
    */
-  async processMultipleBatches(allEvents, maxParallelBatches = 8) {
-    if (allEvents.length <= 5) {
-      // Single batch, use regular processing
+  async processMultipleBatches(allEvents, maxParallelBatches = 3) {
+    if (!allEvents || allEvents.length === 0) {
       return null;
     }
 
-    const batchSize = Math.min(10, Math.ceil(allEvents.length / 4)); // Dynamic batch size up to 10
+    const batchSize = config.BATCH_SIZE;
     const batches = [];
-
-    // Split events into optimized batches
     for (let i = 0; i < allEvents.length; i += batchSize) {
       batches.push(allEvents.slice(i, i + batchSize));
     }
 
-    // Use more parallel batches for better throughput
-    const parallelBatches = Math.min(maxParallelBatches, batches.length);
-
     this.logWithTime(
-      `Processing ${parallelBatches} parallel batches of 3 events each (${allEvents.length} total events)`,
+      `Processing ${allEvents.length} events in ${batches.length} parallel batches of ${batchSize}`,
       "info"
     );
 
-    const batchPromises = [];
+    let totalSuccessful = 0;
+    let totalProcessed = 0;
+    const startTime = Date.now();
 
-    for (let i = 0; i < parallelBatches; i++) {
-      const batch = batches[i];
-      if (batch && batch.length > 0) {
-        batchPromises.push(this.processSingleBatch(batch, i));
-      }
-    }
+    // Process up to maxParallelBatches batches at a time
+    for (let i = 0; i < batches.length; i += maxParallelBatches) {
+      if (!this.isRunning) break;
 
-    try {
+      const currentBatches = batches.slice(i, i + maxParallelBatches);
+      const batchPromises = currentBatches.map((batch, idx) =>
+        this.processSingleBatch(batch, i + idx)
+      );
+
       const batchResults = await Promise.allSettled(batchPromises);
 
-      let totalSuccessful = 0;
-      let totalProcessed = 0;
-
-      batchResults.forEach((result, index) => {
+      for (const result of batchResults) {
         if (result.status === "fulfilled" && result.value) {
           totalSuccessful += result.value.successful;
           totalProcessed += result.value.processed;
         }
-      });
+      }
 
-      const overallSuccessRate =
-        totalProcessed > 0 ? totalSuccessful / totalProcessed : 0;
-
-      this.logWithTime(
-        `Parallel batch processing completed: ${totalSuccessful}/${totalProcessed} successful (${Math.round(
-          overallSuccessRate * 100
-        )}%)`,
-        overallSuccessRate > 0.7 ? "success" : "warning"
-      );
-
-      return {
-        successful: totalSuccessful,
-        processed: totalProcessed,
-        successRate: overallSuccessRate,
-        remainingEvents: allEvents.slice(parallelBatches * batchSize),
-      };
-    } catch (error) {
-      this.logWithTime(
-        `Error in parallel batch processing: ${error.message}`,
-        "error"
-      );
-      return null;
+      // Small stagger between batch groups
+      if (i + maxParallelBatches < batches.length) {
+        await setTimeout(50 + Math.random() * 100);
+      }
     }
+
+    const processingTime = Date.now() - startTime;
+    const overallSuccessRate = totalProcessed > 0 ? totalSuccessful / totalProcessed : 0;
+
+    this.logWithTime(
+      `Parallel processing completed: ${totalSuccessful}/${totalProcessed} successful (${Math.round(overallSuccessRate * 100)}%) in ${processingTime}ms`,
+      overallSuccessRate > 0.7 ? "success" : "warning"
+    );
+
+    return {
+      successful: totalSuccessful,
+      processed: totalProcessed,
+      successRate: overallSuccessRate,
+      remainingEvents: [],
+    };
   }
 
   /**
-   * Process a single batch of 3 events with optimized timing
+   * Process a single batch of events in parallel using Promise.allSettled
    */
   async processSingleBatch(batch, batchIndex = 0) {
     const startTime = Date.now();
+    let successful = 0;
+    let processed = 0;
 
-    // Add small stagger between parallel batches
-    if (batchIndex > 0) {
-      await setTimeout(batchIndex * 100);
-    }
-
-    const processingPromises = batch.map(async (eventId, index) => {
-      if (this.processingEvents.has(eventId)) {
-        return { eventId, success: false, reason: "already_processing" };
-      }
-
-      // Minimal stagger within batch
-      const staggerDelay = index * 75; // 75ms between events in batch
-      await setTimeout(staggerDelay);
-
-      try {
-        this.processingEvents.add(eventId);
-
-        const result = await Promise.race([
-          this.scrapeEventWithNaturalBehavior(eventId),
-          setTimeout(config.SCRAPE_TIMEOUT + 5000).then(() => {
-            throw new Error(`Batch processing timeout`);
-          }),
-        ]);
-
-        if (result) {
-          this.eventLastProcessedTime.set(eventId, Date.now());
-          this.resetEventFailureTracking(eventId);
-          return { eventId, success: true };
-        } else {
-          await this.handleEventFailureGracefully(eventId);
-          return { eventId, success: false, reason: "scrape_failed" };
+    const results = await Promise.allSettled(
+      batch.map(async (eventId) => {
+        if (this.processingEvents.has(eventId)) {
+          return { eventId, skipped: true };
         }
-      } catch (error) {
-        await this.handleEventFailureGracefully(eventId);
-        return { eventId, success: false, reason: error.message };
-      } finally {
-        this.processingEvents.delete(eventId);
-      }
-    });
 
-    const results = await Promise.allSettled(processingPromises);
+        this.processingEvents.add(eventId);
+        processed++;
 
-    const successful = results.filter(
-      (r) => r.status === "fulfilled" && r.value?.success
-    ).length;
+        try {
+          const result = await Promise.race([
+            this.scrapeEventWithNaturalBehavior(eventId),
+            setTimeout(config.SCRAPE_TIMEOUT + 5000).then(() => {
+              throw new Error(`Batch processing timeout`);
+            }),
+          ]);
 
-    const processed = results.length;
+          if (result) {
+            this.eventLastProcessedTime.set(eventId, Date.now());
+            this.resetEventFailureTracking(eventId);
+            successful++;
+            return { eventId, success: true };
+          } else {
+            await this.handleEventFailureGracefully(eventId);
+            return { eventId, success: false };
+          }
+        } catch (error) {
+          await this.handleEventFailureGracefully(eventId);
+          return { eventId, success: false, error: error.message };
+        } finally {
+          this.processingEvents.delete(eventId);
+        }
+      })
+    );
+
     const processingTime = Date.now() - startTime;
 
     this.logWithTime(
-      `Batch ${
-        batchIndex + 1
-      } completed: ${successful}/${processed} successful in ${processingTime}ms`,
+      `Batch ${batchIndex + 1} completed: ${successful}/${processed} successful in ${processingTime}ms`,
       successful === processed ? "success" : "warning"
     );
 
@@ -2808,13 +2717,9 @@ export class ScraperManager {
     let proxy = null;
 
     try {
-      // Add natural pre-processing delay (human-like behavior)
-      const preDelay = 200 + Math.random() * 800; // 200-1000ms
-      await setTimeout(preDelay);
-
-      // Check if we should skip due to recent processing - reduced interval for 10k+ events
+      // Check if we should skip due to recent processing
       const lastProcessed = this.eventLastProcessedTime.get(eventId);
-      const minInterval = 8000 + Math.random() * 4000; // 8-12 seconds for high volume
+      const minInterval = 3000 + Math.random() * 2000; // 3-5 seconds
       if (lastProcessed && Date.now() - lastProcessed < minInterval) {
         this.logWithTime(
           `Skipping event ${eventId} - processed recently`,
@@ -2856,7 +2761,7 @@ export class ScraperManager {
             "warning"
           );
           if (proxyAttempts < maxProxyAttempts) {
-            await setTimeout(1000 * proxyAttempts); // Progressive delay
+            await setTimeout(300 * proxyAttempts); // Quick progressive delay
           }
         }
       }
@@ -2903,7 +2808,7 @@ export class ScraperManager {
             "warning"
           );
           if (headerAttempts < maxHeaderAttempts) {
-            await setTimeout(2000 * headerAttempts); // Progressive delay
+            await setTimeout(500 * headerAttempts); // Quick progressive delay
           }
         }
       }
@@ -2922,11 +2827,7 @@ export class ScraperManager {
         naturalBehavior: true,
       };
 
-      // Add natural pre-scrape delay
-      const preScrapeDelay = 300 + Math.random() * 700; // 300-1000ms
-      await setTimeout(preScrapeDelay);
-
-      // Perform scrape with extended timeout for natural behavior
+      // Perform scrape with timeout
       const extendedTimeout = (config.SCRAPE_TIMEOUT || 30000) + 5000; // Extra 5s
 
       const result = await Promise.race([
@@ -2945,10 +2846,6 @@ export class ScraperManager {
         // Empty results should be treated as failures
         throw new Error("Event returned empty results - treating as failed");
       }
-
-      // Add natural post-processing delay
-      const postDelay = 100 + Math.random() * 400; // 100-500ms
-      await setTimeout(postDelay);
 
       // Update metadata and tracking
       await this.updateEventMetadataAsync(eventId, result);
@@ -2972,9 +2869,8 @@ export class ScraperManager {
         );
       }
 
-      // Update processed time with jitter to prevent synchronization
-      const jitteredTime = Date.now() + Math.random() * 5000; // 0-5s jitter
-      this.eventLastProcessedTime.set(eventId, jitteredTime);
+      // Update processed time
+      this.eventLastProcessedTime.set(eventId, Date.now());
 
       this.failedEvents.delete(eventId);
       this.clearFailureCount(eventId);
@@ -3378,601 +3274,10 @@ export class ScraperManager {
     }
   }
 
-  /**
-   * Get statistics about stale events (events not updated in specific time periods)
-   */
-  async getStaleEventStats() {
-    const now = Date.now();
-    const TEN_MINUTES = 10 * 60 * 1000;
-    const SIX_MINUTES = 6 * 60 * 1000;
-    const THREE_MINUTES = 3 * 60 * 1000;
-
-    try {
-      // Get all active events from database
-      const activeEvents = await Event.find({
-        Skip_Scraping: { $ne: true },
-      })
-        .select("Event_ID Event_Name Last_Updated")
-        .lean();
-
-      const stats = {
-        totalActiveEvents: activeEvents.length,
-        staleOver3Min: [],
-        staleOver6Min: [],
-        staleOver10Min: [],
-        recentlyUpdated: [],
-      };
-
-      for (const event of activeEvents) {
-        const lastUpdated = event.Last_Updated
-          ? new Date(event.Last_Updated).getTime()
-          : 0;
-        const timeSinceUpdate = now - lastUpdated;
-        const minutesSinceUpdate = Math.floor(timeSinceUpdate / 60000);
-
-        const eventInfo = {
-          eventId: event.Event_ID,
-          eventName: event.Event_Name,
-          lastUpdated: event.Last_Updated,
-          minutesSinceUpdate,
-        };
-
-        if (timeSinceUpdate > TEN_MINUTES) {
-          stats.staleOver10Min.push(eventInfo);
-        } else if (timeSinceUpdate > SIX_MINUTES) {
-          stats.staleOver6Min.push(eventInfo);
-        } else if (timeSinceUpdate > THREE_MINUTES) {
-          stats.staleOver3Min.push(eventInfo);
-        } else {
-          stats.recentlyUpdated.push(eventInfo);
-        }
-      }
-
-      // Sort by time since update (most stale first)
-      const sortByStale = (a, b) => b.minutesSinceUpdate - a.minutesSinceUpdate;
-      stats.staleOver10Min.sort(sortByStale);
-      stats.staleOver6Min.sort(sortByStale);
-      stats.staleOver3Min.sort(sortByStale);
-
-      return stats;
-    } catch (error) {
-      this.logWithTime(
-        `Error getting stale event stats: ${error.message}`,
-        "error"
-      );
-      return null;
-    }
-  }
-
-  /**
-   * Handle stale events - try recovery first, then auto-stop if needed
-   */
-  async handleStaleEvents(processedEventsSet) {
-    try {
-      const stats = await this.getStaleEventStats();
-      if (!stats) return;
-
-      // Log summary of stale events
-      if (
-        stats.staleOver10Min.length > 0 ||
-        stats.staleOver6Min.length > 0 ||
-        stats.staleOver3Min.length > 0
-      ) {
-        this.logWithTime(
-          `⚠️ Stale Event Summary: ${stats.staleOver10Min.length} events >10min, ${stats.staleOver6Min.length} events >6min, ${stats.staleOver3Min.length} events >3min`,
-          "warning"
-        );
-      } else {
-        this.logWithTime(
-          `✅ No stale events: ${stats.recentlyUpdated.length} events updated recently`,
-          "success"
-        );
-      }
-
-      // Handle CRITICAL events (>10 minutes) with AGGRESSIVE recovery
-      if (stats.staleOver10Min.length > 0) {
-        const criticalEventIds = stats.staleOver10Min.map((e) => e.eventId);
-        this.logWithTime(
-          `🚨 CRITICAL: ${criticalEventIds.length} events not updated for >10 minutes`,
-          "error"
-        );
-
-        // Try AGGRESSIVE recovery first for ALL critical events
-        const recoveryResult = await this.attemptAggressiveRecovery(
-          criticalEventIds
-        );
-
-        // Log recovery results
-        this.logWithTime(
-          `🚨 CRITICAL Recovery Results: ${recoveryResult.recovered.length} recovered, ${recoveryResult.failed.length} failed out of ${recoveryResult.attempts} attempts`,
-          recoveryResult.recovered.length > 0 ? "success" : "error"
-        );
-
-        // Add recovered events to processed set
-        recoveryResult.recovered.forEach((eventId) =>
-          processedEventsSet.add(eventId)
-        );
-
-        // AUTO-STOP REMOVED: Failed recovery events will continue to be retried
-        if (recoveryResult.failed.length > 0) {
-          this.logWithTime(
-            `Recovery failed for ${recoveryResult.failed.length} events - will continue retrying`,
-            "warning"
-          );
-        }
-      }
-
-      // Handle STANDARD stale events (3-10 minutes) with intensive recovery
-      if (stats.staleOver3Min.length > 0 || stats.staleOver6Min.length > 0) {
-        const staleEvents = stats.staleOver3Min.concat(stats.staleOver6Min);
-        // Filter to events not recently processed to avoid over-recovery
-        const eventsToRecover = staleEvents.filter(
-          (event) =>
-            !processedEventsSet.has(event.eventId) &&
-            event.minutesSinceUpdate >= 3
-        );
-
-        if (eventsToRecover.length > 0) {
-          const eventIdsToRecover = eventsToRecover.map((e) => e.eventId);
-          this.logWithTime(
-            `🔄 STANDARD: Attempting recovery of ${eventIdsToRecover.length} stale events (3-10 minutes old)`,
-            "warning"
-          );
-
-          // Try intensive recovery for batches of events
-          const recoveryResult = await this.attemptIntensiveRecovery(
-            eventIdsToRecover
-          );
-
-          // Log recovery results
-          this.logWithTime(
-            `🔄 STANDARD Recovery Results: ${recoveryResult.recovered.length} recovered, ${recoveryResult.failed.length} failed out of ${recoveryResult.attempts} attempts`,
-            recoveryResult.recovered.length > 0 ? "success" : "warning"
-          );
-
-          // Add recovered events to processed set to prevent over-recovery
-          recoveryResult.recovered.forEach((eventId) =>
-            processedEventsSet.add(eventId)
-          );
-        }
-      }
-    } catch (error) {
-      this.logWithTime(
-        `Error handling stale events: ${error.message}`,
-        "error"
-      );
-    }
-  }
-
-  /**
-   * Handle CRITICAL stale events (>10 minutes) with AGGRESSIVE recovery and potential auto-stop
-   */
-  async handleCriticalStaleEvents(criticalEvents, processedEventsSet) {
-    if (criticalEvents.length === 0) return;
-
-    const criticalEventIds = criticalEvents.map((e) => e.eventId);
-    this.logWithTime(
-      `🚨 CRITICAL: ${criticalEventIds.length} events not updated for >10 minutes`,
-      "error"
-    );
-
-    // Try AGGRESSIVE recovery first for ALL critical events
-    const recoveryResult = await this.attemptAggressiveRecovery(
-      criticalEventIds
-    );
-
-    // Log recovery results
-    this.logWithTime(
-      `🚨 CRITICAL Recovery Results: ${recoveryResult.recovered.length} recovered, ${recoveryResult.failed.length} failed out of ${recoveryResult.attempts} attempts`,
-      recoveryResult.recovered.length > 0 ? "success" : "error"
-    );
-
-    // Add recovered events to processed set
-    recoveryResult.recovered.forEach((eventId) =>
-      processedEventsSet.add(eventId)
-    );
-
-    // AUTO-STOP REMOVED: Failed recovery events will continue to be retried
-    if (recoveryResult.failed.length > 0) {
-      this.logWithTime(
-        `Critical recovery failed for ${recoveryResult.failed.length} events - will continue retrying`,
-        "warning"
-      );
-    }
-  }
-
-  /**
-   * Handle STANDARD stale events (3-10 minutes) with intensive recovery
-   */
-  async handleStandardStaleEvents(staleEvents, processedEventsSet) {
-    if (staleEvents.length === 0) return;
-
-    // Filter to events not recently processed to avoid over-recovery
-    const eventsToRecover = staleEvents.filter(
-      (event) =>
-        !processedEventsSet.has(event.eventId) && event.minutesSinceUpdate >= 3
-    );
-
-    if (eventsToRecover.length === 0) {
-      this.logWithTime(
-        `Skipping recovery - ${staleEvents.length} stale events already recently processed`,
-        "info"
-      );
-      return;
-    }
-
-    const eventIdsToRecover = eventsToRecover.map((e) => e.eventId);
-    this.logWithTime(
-      `🔄 STANDARD: Attempting recovery of ${eventIdsToRecover.length} stale events (3-10 minutes old)`,
-      "warning"
-    );
-
-    // Try intensive recovery for batches of events
-    const recoveryResult = await this.attemptIntensiveRecovery(
-      eventIdsToRecover
-    );
-
-    // Log recovery results
-    this.logWithTime(
-      `🔄 STANDARD Recovery Results: ${recoveryResult.recovered.length} recovered, ${recoveryResult.failed.length} failed out of ${recoveryResult.attempts} attempts`,
-      recoveryResult.recovered.length > 0 ? "success" : "warning"
-    );
-
-    // Add recovered events to processed set to prevent over-recovery
-    recoveryResult.recovered.forEach((eventId) =>
-      processedEventsSet.add(eventId)
-    );
-
-    // AUTO-STOP REMOVED: Failed recovery events will continue to be retried regardless of time
-    if (recoveryResult.failed.length > 0) {
-      this.logWithTime(
-        `Standard recovery failed for ${recoveryResult.failed.length} events - will continue retrying indefinitely`,
-        "warning"
-      );
-    }
-  }
-
-  // HANDLE AUTO STOP EVENTS METHOD REMOVED - Auto-stopping functionality disabled
-
-  /**
-   * Attempt AGGRESSIVE recovery for critically stale events (>8 minutes)
-   */
-  async attemptAggressiveRecovery(eventIds) {
-    const results = {
-      recovered: [],
-      failed: [],
-      attempts: 0,
-    };
-
-    if (eventIds.length === 0) {
-      return results;
-    }
-
-    this.logWithTime(
-      `🚨 Starting AGGRESSIVE recovery for ${eventIds.length} critically stale events`,
-      "warning"
-    );
-
-    for (const eventId of eventIds) {
-      try {
-        results.attempts++;
-
-        this.logWithTime(
-          `🔧 AGGRESSIVE recovery attempt for event ${eventId}`,
-          "warning"
-        );
-
-        // STEP 1: Complete reset of all failure states
-        this.failedEvents.delete(eventId);
-        this.cooldownEvents.delete(eventId);
-        this.eventFailureCounts.delete(eventId);
-        this.eventFailureTimes.delete(eventId);
-        this.processingEvents.delete(eventId);
-
-        // STEP 2: Just release proxy - no blocking
-        try {
-          this.proxyManager.releaseProxy(eventId, false);
-          this.logWithTime(
-            `Released proxy for event ${eventId} during recovery`,
-            "info"
-          );
-        } catch (proxyError) {
-          this.logWithTime(
-            `Error releasing proxy: ${proxyError.message}`,
-            "warning"
-          );
-        }
-
-        // STEP 3: Force complete session reset
-        try {
-          await this.sessionManager.forceSessionRotation();
-          this.headersCache.clear();
-          this.headerRefreshTimestamps.clear();
-        } catch (sessionError) {
-          this.logWithTime(
-            `Session reset error during aggressive recovery: ${sessionError.message}`,
-            "warning"
-          );
-        }
-
-        // STEP 4: Get multiple random event IDs for fresh headers
-        const randomEventIds = [];
-        try {
-          const randomEvents = await Event.aggregate([
-            {
-              $match: {
-                Skip_Scraping: { $ne: true },
-                url: { $exists: true, $ne: "" },
-              },
-            },
-            { $sample: { size: 5 } }, // Get 5 random events to create diversity
-            { $project: { Event_ID: 1 } },
-          ]);
-
-          randomEventIds.push(...randomEvents.map((e) => e.Event_ID));
-        } catch (dbError) {
-          this.logWithTime(
-            `Database error during aggressive recovery: ${dbError.message}`,
-            "warning"
-          );
-        }
-
-        // STEP 5: Multiple recovery attempts with different strategies
-        let recovered = false;
-        const strategies = [
-          "fresh_headers",
-          "new_proxy",
-          "fallback_headers",
-          "direct_scrape",
-        ];
-
-        for (const strategy of strategies) {
-          if (recovered) break;
-
-          try {
-            this.logWithTime(
-              `Trying strategy "${strategy}" for event ${eventId}`,
-              "info"
-            );
-
-            switch (strategy) {
-              case "fresh_headers":
-                if (randomEventIds.length > 0) {
-                  const randomId =
-                    randomEventIds[
-                      Math.floor(Math.random() * randomEventIds.length)
-                    ];
-                  await this.refreshEventHeaders(randomId, true);
-                }
-                break;
-
-              case "new_proxy":
-                // Just get a new proxy - no blocking
-                try {
-                  this.proxyManager.releaseProxy(eventId, false);
-                  const proxyData = this.proxyManager.getProxyForEvent(eventId);
-                  if (proxyData) {
-                    const { proxyAgent, proxy } = this.proxyManager.createProxyAgent(proxyData);
-                    this.logWithTime(
-                      `Using new proxy for ${eventId} during recovery: ${proxy?.proxy || 'unknown'}`,
-                      "info"
-                    );
-                  }
-                } catch (proxyError) {
-                  this.logWithTime(
-                    `Error getting new proxy: ${proxyError.message}`,
-                    "warning"
-                  );
-                }
-                break;
-
-              case "fallback_headers":
-                // Try with any available headers from rotation pool
-                if (this.headerRotationPool.length > 0) {
-                  this.logWithTime(
-                    `Using rotation pool headers for ${eventId}`,
-                    "info"
-                  );
-                }
-                break;
-
-              case "direct_scrape":
-                // Last resort: direct scrape with minimal setup
-                this.logWithTime(
-                  `Direct scrape attempt for ${eventId}`,
-                  "info"
-                );
-                break;
-            }
-
-            // Attempt scraping with current strategy
-            const scrapeResult = await this.scrapeEvent(eventId, 0, null);
-
-            if (scrapeResult) {
-              recovered = true;
-              results.recovered.push(eventId);
-              this.logWithTime(
-                `✅ AGGRESSIVE recovery SUCCESS for event ${eventId} using strategy "${strategy}"`,
-                "success"
-              );
-
-              // Clear all failure tracking
-              this.clearFailureCount(eventId);
-              this.eventFailureTimes.delete(eventId);
-              break;
-            }
-          } catch (strategyError) {
-            this.logWithTime(
-              `Strategy "${strategy}" failed for ${eventId}: ${strategyError.message}`,
-              "warning"
-            );
-          }
-
-          // Small delay between strategies
-          await setTimeout(200);
-        }
-
-        if (!recovered) {
-          results.failed.push(eventId);
-          this.logWithTime(
-            `❌ AGGRESSIVE recovery FAILED for event ${eventId} - tried all strategies`,
-            "error"
-          );
-
-          // Mark for potential auto-stop
-          this.eventFailureTimes.set(eventId, Date.now());
-        }
-
-        // Delay between events to avoid overwhelming the system
-        await setTimeout(500);
-      } catch (error) {
-        results.failed.push(eventId);
-        this.logWithTime(
-          `💥 AGGRESSIVE recovery ERROR for ${eventId}: ${error.message}`,
-          "error"
-        );
-      }
-    }
-
-    return results;
-  }
-
-  /**
-   * Attempt intensive recovery for stale events
-   */
-  async attemptIntensiveRecovery(eventIds) {
-    const results = {
-      recovered: [],
-      failed: [],
-      attempts: 0,
-    };
-
-    if (eventIds.length === 0) {
-      return results;
-    }
-
-    this.logWithTime(
-      `Starting INTENSIVE recovery for ${eventIds.length} stale events`,
-      "info"
-    );
-
-    for (const eventId of eventIds) {
-      try {
-        results.attempts++;
-
-        this.logWithTime(
-          `🔄 INTENSIVE recovery attempt for event ${eventId}`,
-          "info"
-        );
-
-        // Mark recovery attempt time
-        this.eventFailureTimes.set(eventId, Date.now());
-
-        // Reset failure states for recovery
-        this.cooldownEvents.delete(eventId);
-        this.failedEvents.delete(eventId);
-        this.processingEvents.delete(eventId);
-
-        // Reduce failure count to give more retry chances
-        const currentFailures = this.eventFailureCounts.get(eventId) || [];
-        if (currentFailures.length > 0) {
-          // Remove half of the failures to give more chances
-          this.eventFailureCounts.set(
-            eventId,
-            currentFailures.slice(Math.floor(currentFailures.length / 2))
-          );
-        }
-
-        // Try multiple recovery approaches
-        let recovered = false;
-        const approaches = [
-          "fresh_session",
-          "new_proxy_headers",
-          "fallback_approach",
-        ];
-
-        for (const approach of approaches) {
-          if (recovered) break;
-
-          try {
-            this.logWithTime(
-              `Trying approach "${approach}" for event ${eventId}`,
-              "info"
-            );
-
-            switch (approach) {
-              case "fresh_session":
-                // Force completely fresh session and headers
-                const randomEventId = await this.getRandomEventId(eventId);
-                await this.refreshEventHeaders(randomEventId, true);
-                break;
-
-              case "new_proxy_headers":
-                // Get new proxy and force header refresh
-                this.proxyManager.releaseProxy(eventId, false);
-                const anotherRandomId = await this.getRandomEventId(eventId);
-                await this.refreshEventHeaders(anotherRandomId, true);
-                break;
-
-              case "fallback_approach":
-                // Try with minimal setup as fallback
-                this.logWithTime(
-                  `Fallback recovery approach for ${eventId}`,
-                  "info"
-                );
-                break;
-            }
-
-            // Attempt scraping with current approach
-            const scrapeResult = await this.scrapeEvent(eventId, 0, null);
-
-            if (scrapeResult) {
-              recovered = true;
-              results.recovered.push(eventId);
-              this.logWithTime(
-                `✅ INTENSIVE recovery SUCCESS for event ${eventId} using approach "${approach}"`,
-                "success"
-              );
-
-              // Clear failure tracking
-              this.clearFailureCount(eventId);
-              this.eventFailureTimes.delete(eventId);
-              break;
-            }
-          } catch (approachError) {
-            this.logWithTime(
-              `Approach "${approach}" failed for ${eventId}: ${approachError.message}`,
-              "warning"
-            );
-          }
-
-          // Small delay between approaches
-          await setTimeout(300);
-        }
-
-        if (!recovered) {
-          results.failed.push(eventId);
-          this.logWithTime(
-            `❌ INTENSIVE recovery FAILED for event ${eventId} - tried all approaches`,
-            "warning"
-          );
-        }
-
-        // Small delay between recovery attempts
-        await setTimeout(500);
-      } catch (error) {
-        results.failed.push(eventId);
-        this.logWithTime(
-          `💥 INTENSIVE recovery ERROR for ${eventId}: ${error.message}`,
-          "error"
-        );
-      }
-    }
-
-    return results;
-  }
-
-  // AUTO-STOP FUNCTIONALITY REMOVED - Events will no longer be automatically stopped
+  // Recovery methods removed - multiple instances handle redundancy
+  // getStaleEventStats, handleStaleEvents, handleCriticalStaleEvents,
+  // handleStandardStaleEvents, attemptAggressiveRecovery, attemptIntensiveRecovery,
+  // performEmergencyRecovery all removed
 
   /**
    * Force immediate cleanup of all tracking Maps (manual cleanup)
@@ -4211,8 +3516,9 @@ export class ScraperManager {
       processingCount: this.processingEvents.size,
       failedCount: this.failedEvents.size,
       successRate:
-        (this.successCount / (this.successCount + this.failedEvents.size)) *
-        100,
+        (this.successCount + this.failedEvents.size) > 0
+          ? (this.successCount / (this.successCount + this.failedEvents.size)) * 100
+          : 0,
       memoryUsage: process.memoryUsage(),
     };
 
@@ -4268,54 +3574,17 @@ export class ScraperManager {
    */
   startPerformanceMonitoring() {
     let monitoringCycleCount = 0;
-    const processedEvents = new Set(); // Track processed events
-    let lastSuccessfulScrapeTime = Date.now(); // Track last successful scrape time
 
     setInterval(async () => {
       monitoringCycleCount++;
-
-      // Clear processed events every 6 cycles (3 minutes)
-      if (monitoringCycleCount % 6 === 0) {
-        processedEvents.clear();
-      }
 
       // Run cleanup every 4 cycles (2 minutes)
       if (monitoringCycleCount % 4 === 0) {
         await this.cleanupInactiveEvents();
       }
 
-      // Run stale event recovery every 6 cycles (3 minutes)
-      if (monitoringCycleCount % 6 === 0) {
-        await this.handleStaleEvents(processedEvents);
-      }
-
-      // Check if system is completely stuck (no successful scrapes in 5 minutes)
-      const currentTime = Date.now();
-      const timeSinceLastSuccess = this.lastSuccessTime
-        ? currentTime - this.lastSuccessTime.valueOf()
-        : Infinity;
-
-      if (timeSinceLastSuccess > 300000) {
-        // 5 minutes
-        this.logWithTime(
-          `⚠️ SYSTEM STALLED: No successful scrapes in ${Math.floor(
-            timeSinceLastSuccess / 60000
-          )} minutes - initiating emergency recovery!`,
-          "error"
-        );
-
-        // Emergency recovery procedure
-        await this.performEmergencyRecovery();
-
-        // Reset tracking to avoid multiple recoveries
-        if (this.lastSuccessTime) {
-          this.lastSuccessTime = moment();
-        }
-      }
-
       const stats = await this.getPerformanceStats();
-      const eventsPerMinute = stats.eventsUpdatedLast1Min; // Events actually updated in last minute
-      const projectedCapacity = eventsPerMinute * 100; // Events that can be updated in 3 minutes
+      const eventsPerMinute = stats.eventsUpdatedLast1Min;
       const memoryMB = Math.round(stats.memoryUsage.heapUsed / 1024 / 1024);
 
       // Get CSV stats synchronously
@@ -4334,7 +3603,7 @@ export class ScraperManager {
         `Performance: ${stats.eventsUpdatedLast3Min}/${stats.totalEvents} events updated in 3min | ` +
           `Queue: ${stats.queueLength} | Processing: ${stats.processingCount} | ` +
           `Success: ${stats.successRate.toFixed(1)}% | ` +
-          `Rate: ${eventsPerMinute}/min | Capacity: ${projectedCapacity} events/3min | ` +
+          `Rate: ${eventsPerMinute}/min | ` +
           `Tracked: ${this.eventUpdateTimestamps.size} events | ` +
           `Memory: ${memoryMB}MB${csvInfo}`,
         "info"
@@ -4374,123 +3643,20 @@ export class ScraperManager {
         );
       }
 
-      // Check if we can handle 1000+ events
-      if (projectedCapacity >= 1000) {
+      // Log capacity info (parallel mode)
+      const projected3Min = eventsPerMinute * 3;
+      const totalTracked = this.eventUpdateTimestamps.size || stats.totalEvents;
+      if (totalTracked > 0) {
+        const canMeet3Min = projected3Min >= totalTracked;
         this.logWithTime(
-          `✅ System capable of handling 1000+ events (current capacity: ${projectedCapacity} events/3min)`,
-          "success"
-        );
-      } else if (projectedCapacity >= 500) {
-        this.logWithTime(
-          `⚠️ System handling ${projectedCapacity} events/3min - scaling needed for 1000+`,
-          "warning"
-        );
-      } else {
-        this.logWithTime(
-          `❌ System only handling ${projectedCapacity} events/3min - major optimization needed`,
-          "error"
+          `Parallel rate: ${eventsPerMinute} events/min (~${projected3Min}/3min) | Target: ${totalTracked} events`,
+          canMeet3Min ? "success" : "warning"
         );
       }
     }, 30000);
   }
 
-  /**
-   * Emergency recovery procedure when system is completely stuck
-   */
-  async performEmergencyRecovery() {
-    this.logWithTime("🚨 INITIATING EMERGENCY SYSTEM RECOVERY 🚨", "error");
-
-    try {
-      // 1. Reset all processing maps and sets
-      this.logWithTime("Clearing all processing locks and states", "warning");
-      this.processingEvents.clear();
-      this.processingLocks.clear();
-      this.activeJobs.clear();
-
-      // 2. Force reset of all session and cookie data
-      this.logWithTime("Force resetting all sessions and cookies", "warning");
-      this.headersCache.clear();
-      this.headerRefreshTimestamps.clear();
-      this.headerRotationPool = [];
-
-      // 3. Release all proxies
-      this.logWithTime("Releasing all proxies", "warning");
-      this.proxyManager.releaseAllProxies();
-
-      // 4. Hard reset sessions
-      try {
-        await Promise.race([
-          this.sessionManager.forceSessionRotation(),
-          setTimeout(20000).then(() => {
-            throw new Error(
-              "Session rotation timed out during emergency recovery"
-            );
-          }),
-        ]);
-        this.logWithTime("Successfully reset session manager", "success");
-      } catch (sessionError) {
-        this.logWithTime(
-          `Session manager reset failed: ${sessionError.message}`,
-          "error"
-        );
-      }
-
-      // 5. API circuit breaker reset logic removed
-
-      // 6. Reset global error counters
-      this.globalConsecutiveErrors = 0;
-
-      // 7. Reload a subset of critical events into processing queue
-      try {
-        const criticalEvents = await Event.find({
-          Skip_Scraping: { $ne: true },
-          $or: [
-            { Last_Updated: { $lt: new Date(Date.now() - 120000) } }, // Not updated in 2 minutes
-            { Last_Updated: { $exists: false } },
-          ],
-        })
-          .sort({ Last_Updated: 1 })
-          .limit(50)
-          .select("Event_ID")
-          .lean();
-
-        if (criticalEvents.length > 0) {
-          // Clear current processing queue and add critical events
-          this.eventProcessingQueue = [];
-          for (const event of criticalEvents) {
-            this.eventProcessingQueue.push(event.Event_ID);
-          }
-
-          this.logWithTime(
-            `Added ${criticalEvents.length} critical events to processing queue`,
-            "success"
-          );
-        } else {
-          this.logWithTime(
-            "No critical events found for emergency recovery",
-            "warning"
-          );
-        }
-      } catch (dbError) {
-        this.logWithTime(
-          `Error loading critical events: ${dbError.message}`,
-          "error"
-        );
-      }
-
-      // 8. Ensure concurrency semaphore is reset
-      this.concurrencySemaphore = config.CONCURRENT_LIMIT;
-
-      this.logWithTime(
-        "🔄 EMERGENCY RECOVERY COMPLETE - resuming operation",
-        "success"
-      );
-      return true;
-    } catch (error) {
-      this.logWithTime(`Emergency recovery failed: ${error.message}`, "error");
-      return false;
-    }
-  }
+  // performEmergencyRecovery removed - multiple instances handle redundancy
 
   /**
    * Start session health monitoring to detect and handle session failures
@@ -4867,18 +4033,7 @@ export class ScraperManager {
   }
 }
 
-// Initialize recovery methods after class is fully defined
-ScraperManager.prototype.initializeRecoverySystem = function() {
-  this.handleStaleEvents = this.handleStaleEvents?.bind(this) || function() {};
-  this.handleCriticalStaleEvents = this.handleCriticalStaleEvents?.bind(this) || this.handleStaleEvents;
-  this.handleStandardStaleEvents = this.handleStandardStaleEvents?.bind(this) || this.handleStaleEvents;
-  // handleAutoStopEvents binding removed - auto-stop functionality disabled
-  this.recoverEventBatch = this.recoverEventBatch?.bind(this) || function() {};
-  this.recoverSingleEvent = this.recoverSingleEvent?.bind(this) || function() {};
-};
-
 const scraperManager = new ScraperManager();
-scraperManager.initializeRecoverySystem();
 export default scraperManager;
 
 // Add a function to export that allows checking logs

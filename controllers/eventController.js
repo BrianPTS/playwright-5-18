@@ -255,53 +255,18 @@ export const deleteEvent = async (req, res) => {
 };
 
 export const handleStaleEvents = async (req, res) => {
-  try {
-    // Trigger stale event recovery and auto-stop process manually
-    await scraperManager.handleStaleEvents();
-    
-    res.json({
-      status: "success",
-      message: "Stale event recovery and auto-stop process completed",
-    });
-  } catch (error) {
-    console.error("Error in manual stale event handling:", error);
-    res.status(500).json({
-      status: "error",
-      message: error.message,
-    });
-  }
+  res.json({
+    status: "success",
+    message: "Recovery removed - multiple instances handle redundancy",
+  });
 };
 
 export const getStaleEventStats = async (req, res) => {
-  try {
-    // Get statistics about stale events
-    const stats = await scraperManager.getStaleEventStats();
-    
-    if (!stats) {
-      return res.status(500).json({
-        status: "error",
-        message: "Failed to get stale event statistics",
-      });
-    }
-    
-    res.json({
-      status: "success",
-      data: stats,
-      summary: {
-        totalActive: stats.totalActiveEvents,
-        criticalStale: stats.staleOver10Min.length,
-        csvExcluded: stats.staleOver6Min.length + stats.staleOver10Min.length,
-        warningStale: stats.staleOver3Min.length,
-        healthy: stats.recentlyUpdated.length
-      }
-    });
-  } catch (error) {
-    console.error("Error getting stale event stats:", error);
-    res.status(500).json({
-      status: "error",
-      message: error.message,
-    });
-  }
+  res.json({
+    status: "success",
+    message: "Recovery removed - stale event stats no longer tracked",
+    data: null,
+  });
 };
 
 export const forceCsvGeneration = async (req, res) => {
