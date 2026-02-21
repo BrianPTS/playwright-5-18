@@ -4,14 +4,15 @@ import { cpus } from "os";
 export default {
   // Time limits - optimized for better flow
   MAX_UPDATE_INTERVAL: 120000, // Strict 2-minute update requirement
-  SCRAPE_TIMEOUT: 90000, // Increased timeout to prevent hanging (was 60s, now 90s)
+  SCRAPE_TIMEOUT: 45000, // 45s max per event — leaves headroom within 2-min cycle
   MIN_TIME_BETWEEN_EVENT_SCRAPES: 500, // Minimal delay - page pool handles concurrency naturally
   URGENT_THRESHOLD: 110000, // Events needing update within 10 seconds of deadline
   PROCESSING_INTERVAL: 500, // Faster processing interval (reduced to 500ms for better throughput)
   
-  // Concurrency settings - optimized for 1000+ events with browser page pool parallelism
-  CONCURRENT_LIMIT: Math.max(80, Math.floor(cpus().length * 10)), // High concurrency - page pool handles queuing
-  BATCH_SIZE: 50, // Larger batches for page pool throughput
+  // Concurrency settings — optimized for 30 PM2 instances sharing 1000+ events
+  // Each instance handles ~33 events; 3 pool pages × 20 events/batch = plenty of throughput
+  CONCURRENT_LIMIT: Math.max(40, Math.floor(cpus().length * 5)), // Lower per-instance — 30 instances total
+  BATCH_SIZE: 30, // Smaller batches per instance since events are spread across 30 instances
   
   // Retry settings - optimized for resilience
   MAX_RETRIES: 8, // Increased from 5 for better persistence

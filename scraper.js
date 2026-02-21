@@ -1115,7 +1115,8 @@ async function callTicketmasterAPI(facetHeader, proxyAgent, eventId, event, mapH
         if (batchError.message?.includes('not initialized') ||
             batchError.message?.includes('disconnected') ||
             batchError.message?.includes('Target closed')) {
-          browserPagePool.initialized = false;
+          // Trigger browser restart — requests during restart are queued automatically
+          browserPagePool._restartBrowser('error-recovery').catch(() => {});
         }
         DataMap = null;
         DataFacets = null;
