@@ -924,6 +924,7 @@ async function initApiBrowserContext(proxy = null, cookies = null) {
       isMobile: false,
       javaScriptEnabled: true,
       ignoreHTTPSErrors: true,
+      bypassCSP: true,
       extraHTTPHeaders: {
         'Accept': 'application/json, text/plain, */*',
         'Accept-Language': 'en-US,en;q=0.9',
@@ -931,6 +932,24 @@ async function initApiBrowserContext(proxy = null, cookies = null) {
         'Cache-Control': 'no-cache',
         'Pragma': 'no-cache',
       }
+    });
+
+    // Add stealth scripts to mask automation indicators
+    await apiContext.addInitScript(() => {
+      Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+      try { delete navigator.__proto__.webdriver; } catch (e) {}
+      Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
+      Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+      window.chrome = { runtime: {}, loadTimes: function() {}, csi: function() {}, app: {} };
+      const origQuery = window.navigator.permissions.query;
+      window.navigator.permissions.query = (p) => (
+        p.name === 'notifications'
+          ? Promise.resolve({ state: Notification.permission })
+          : origQuery(p)
+      );
+      Object.defineProperty(navigator, 'connection', {
+        get: () => ({ effectiveType: '4g', rtt: 50, downlink: 10, saveData: false })
+      });
     });
 
     // Add cookies if provided
@@ -1071,10 +1090,513 @@ function isApiBrowserAvailable() {
   return apiBrowser && apiBrowser.isConnected() && apiContext && apiPage;
 }
 
+// ====================================================
+// RequestBatcher: Groups requests from MANY events into mega-batches.
+// Instead of 1 page per event (2 fetches), 1 page handles 20 events
+// (40 fetches) in a single page.evaluate(Promise.all(...)) call.
+// 5 pages × 25 events = 125 events per cycle ≈ 60-80 events/sec.
+// ====================================================
+class RequestBatcher {
+  constructor(pool, maxEventsPerBatch = 25, flushIntervalMs = 80) {
+    this.pool = pool;
+    this.maxEventsPerBatch = maxEventsPerBatch;
+    this.flushIntervalMs = flushIntervalMs;
+    this.queue = []; // [{requests: [{url,headers}], resolve, reject}]
+    this._timer = null;
+    this._activeFlushes = 0;
+  }
+
+  /**
+   * Submit requests for one event. Returns Promise<results[]>.
+   * Requests are automatically batched with other events for throughput.
+   */
+  submit(requests) {
+    return new Promise((resolve, reject) => {
+      this.queue.push({ requests, resolve, reject });
+      this._scheduleFlush();
+    });
+  }
+
+  _scheduleFlush() {
+    // Immediate flush when batch is full
+    if (this.queue.length >= this.maxEventsPerBatch) {
+      this._tryFlush();
+    }
+    // Always ensure a timer is running while items are queued
+    if (this.queue.length > 0 && !this._timer) {
+      this._timer = setTimeout(() => {
+        this._timer = null;
+        this._tryFlush();
+      }, this.flushIntervalMs);
+    }
+  }
+
+  _tryFlush() {
+    if (this.queue.length === 0) return;
+
+    // Limit parallel flushes to number of pool pages
+    if (this._activeFlushes >= this.pool.pages.length) {
+      // All pages busy — schedule retry
+      if (!this._timer) {
+        this._timer = setTimeout(() => {
+          this._timer = null;
+          this._tryFlush();
+        }, 50);
+      }
+      return;
+    }
+
+    const batch = this.queue.splice(0, this.maxEventsPerBatch);
+    if (batch.length === 0) return;
+
+    this._activeFlushes++;
+    this._executeBatch(batch).finally(() => {
+      this._activeFlushes--;
+      // Flush more if queued
+      if (this.queue.length > 0) {
+        setImmediate(() => this._tryFlush());
+      }
+    });
+
+    // If still more in queue, try another flush (will use a different page)
+    if (this.queue.length > 0) {
+      setImmediate(() => this._tryFlush());
+    }
+  }
+
+  async _executeBatch(batch) {
+    // Build flat request array with index tracking
+    const allRequests = [];
+    const indexMap = []; // maps flat index → {batchIdx, reqIdx}
+
+    for (let i = 0; i < batch.length; i++) {
+      for (let j = 0; j < batch[i].requests.length; j++) {
+        indexMap.push({ bi: i, ri: j });
+        allRequests.push(batch[i].requests[j]);
+      }
+    }
+
+    let page;
+    try {
+      page = await this.pool.acquire(20000); // 20s timeout for page acquisition
+    } catch (err) {
+      for (const item of batch) item.reject(err);
+      return;
+    }
+
+    try {
+      const results = await page.evaluate(async (reqs) => {
+        return Promise.all(reqs.map(async ({ url, headers }) => {
+          try {
+            const r = await fetch(url, {
+              method: 'GET',
+              headers,
+              credentials: 'include',
+              mode: 'cors'
+            });
+            if (!r.ok) return { success: false, status: r.status, error: `HTTP ${r.status}` };
+            const d = await r.json();
+            return { success: true, data: d, status: r.status };
+          } catch (e) {
+            return { success: false, error: e.message, status: 0 };
+          }
+        }));
+      }, allRequests);
+
+      this.pool.release(page);
+
+      // Track errors for cookie refresh triggering
+      for (const r of results) {
+        if (r.status) this.pool.trackError(r.status);
+      }
+
+      // Distribute results back to each event's promise
+      const eventResults = batch.map(() => []);
+      for (let i = 0; i < results.length; i++) {
+        eventResults[indexMap[i].bi][indexMap[i].ri] = results[i];
+      }
+      for (let i = 0; i < batch.length; i++) {
+        batch[i].resolve(eventResults[i]);
+      }
+
+      console.log(`[Batcher] Batch of ${batch.length} events (${allRequests.length} fetches) completed`);
+    } catch (error) {
+      // Handle dead pages
+      if (error.message?.includes('Target closed') ||
+          error.message?.includes('Protocol error') ||
+          error.message?.includes('crashed') ||
+          error.message?.includes('Execution context')) {
+        this.pool._removePage(page);
+      } else {
+        this.pool.release(page);
+      }
+      // Reject all events in this batch
+      for (const item of batch) item.reject(error);
+    }
+  }
+
+  cleanup() {
+    if (this._timer) {
+      clearTimeout(this._timer);
+      this._timer = null;
+    }
+    // Reject everything still queued
+    for (const item of this.queue) {
+      item.reject(new Error('Batcher cleanup'));
+    }
+    this.queue = [];
+  }
+}
+
+// ====================================================
+// BrowserPagePool: Pool of browser pages for parallel API requests
+// All pages share one browser context (same cookies, proxy, real TLS).
+// The RequestBatcher multiplexes many events onto each page.
+// ====================================================
+class BrowserPagePool {
+  constructor(size = 10) {
+    this.size = size;
+    this.pages = [];
+    this.available = [];
+    this.waiting = [];
+    this.initialized = false;
+    this._initPromise = null;
+    this._context = null;
+    this._browser = null;
+    this._batcher = null;
+    // Cookie refresh tracking
+    this._lastCookieRefresh = Date.now();
+    this._cookieRefreshInterval = 8 * 60 * 1000; // 8 minutes
+    this._isRefreshingCookies = false;
+    this._refreshTimer = null;
+    this._consecutiveErrors = 0; // Track errors to trigger early refresh
+  }
+
+  async init(proxy = null, cookies = null, eventId = null) {
+    // Already initialized and browser alive — nothing to do
+    if (this.initialized && this._browser?.isConnected()) return;
+
+    // Another caller is already initializing — piggyback on their promise
+    if (this._initPromise) return this._initPromise;
+
+    this._initPromise = this._doInit(proxy, cookies, eventId);
+    try {
+      await this._initPromise;
+    } catch (e) {
+      this._initPromise = null;
+      throw e;
+    }
+  }
+
+  async _doInit(proxy, cookies, eventId = null) {
+    // Only cleanup if there's something to clean up
+    if (this.pages.length > 0 || this._browser) {
+      await this.cleanup();
+    }
+
+    // initApiBrowserContext launches browser, creates context with stealth scripts,
+    // creates an apiPage, and navigates it to ticketmaster.com — this seeds initial
+    // cookies into the shared context.
+    const { browser, context } = await initApiBrowserContext(proxy, cookies);
+    this._browser = browser;
+    this._context = context;
+
+    // Now create our pool page. Since the context already visited ticketmaster.com
+    // (via initApiBrowserContext), cookies are partially seeded. Navigate our page
+    // to a real event page to get the full set of cookies.
+    const eventUrl = eventId
+      ? `https://www.ticketmaster.com/event/${eventId}`
+      : 'https://www.ticketmaster.com/';
+
+    console.log(`[PagePool] Creating page and loading event page for cookies: ${eventUrl}`);
+    const page = await context.newPage();
+    try {
+      await page.goto(eventUrl, { waitUntil: 'domcontentloaded', timeout: 45000 });
+      // Wait for cookies to settle (analytics, JS cookies)
+      await new Promise(r => setTimeout(r, 2000));
+
+      // Verify cookies exist
+      const allCookies = await context.cookies();
+      const tmCookies = allCookies.filter(c => c.domain.includes('ticketmaster'));
+      console.log(`[PagePool] Page loaded: ${page.url()}`);
+      console.log(`[PagePool] Got ${tmCookies.length} TM cookies after loading event page`);
+      console.log(`[PagePool] Cookie names: ${tmCookies.map(c => c.name).join(', ')}`);
+
+      if (tmCookies.length === 0) {
+        console.warn('[PagePool] WARNING: No TM cookies found after page load!');
+      }
+
+      this.pages.push(page);
+      this.available.push(page);
+    } catch (e) {
+      console.error(`[PagePool] Failed to load event page: ${e.message}`);
+      await page.close().catch(() => {});
+      throw e;
+    }
+
+    // Create remaining pages WITHOUT navigation — they share the same context
+    // so they already have all cookies. This is instant.
+    if (this.size > 1) {
+      console.log(`[PagePool] Creating ${this.size - 1} additional page(s) (shared cookies, no navigation)`);
+      const extraPages = await Promise.all(
+        Array.from({ length: this.size - 1 }, () => context.newPage())
+      );
+      for (const p of extraPages) {
+        this.pages.push(p);
+        this.available.push(p);
+      }
+    }
+
+    // Batcher: batch size 25 events per page, flush every 80ms for throughput
+    this._batcher = new RequestBatcher(this, 25, 80);
+
+    this._lastCookieRefresh = Date.now();
+    this._consecutiveErrors = 0;
+
+    // Start periodic cookie refresh timer (every 8 minutes)
+    this._startCookieRefreshTimer();
+
+    this.initialized = true;
+    this._initPromise = null;
+    console.log(`[PagePool] Ready: ${this.pages.length} page(s) with cookies`);
+  }
+
+  /**
+   * Start a background timer that refreshes cookies every 8 minutes.
+   * Navigates one pool page back to a TM event page to renew all cookies
+   * in the shared browser context.
+   */
+  _startCookieRefreshTimer() {
+    if (this._refreshTimer) clearInterval(this._refreshTimer);
+
+    this._refreshTimer = setInterval(async () => {
+      if (this._isRefreshingCookies) return;
+      await this._refreshCookies();
+    }, this._cookieRefreshInterval);
+  }
+
+  /**
+   * Refresh cookies by reloading a pool page to a Ticketmaster event page.
+   * All pages in the pool share the same browser context, so refreshing
+   * one page renews cookies for all of them.
+   */
+  async _refreshCookies(reason = 'scheduled') {
+    if (this._isRefreshingCookies) return;
+    if (!this.initialized || !this._browser?.isConnected()) return;
+    if (!this._context) return;
+
+    this._isRefreshingCookies = true;
+    const refreshStart = Date.now();
+
+    try {
+      // Get a random event page URL to navigate to
+      let refreshUrl = 'https://www.ticketmaster.com/';
+      try {
+        const { Event } = await import('./models/index.js');
+        const randomEvents = await Event.aggregate([
+          { $match: { Skip_Scraping: { $ne: true }, url: { $exists: true, $ne: '' } } },
+          { $sample: { size: 1 } },
+          { $project: { Event_ID: 1 } }
+        ]);
+        if (randomEvents?.length > 0) {
+          refreshUrl = `https://www.ticketmaster.com/event/${randomEvents[0].Event_ID}`;
+        }
+      } catch (e) {
+        // Fall back to homepage
+      }
+
+      console.log(`[PagePool] Cookie refresh (${reason}): navigating to ${refreshUrl}`);
+
+      // Try to acquire a page, or create a temporary one
+      let page = null;
+      let usedPoolPage = false;
+
+      if (this.available.length > 0) {
+        page = this.available.pop();
+        usedPoolPage = true;
+      } else {
+        // All pages busy — create a temporary page just for cookie refresh
+        page = await this._context.newPage();
+      }
+
+      try {
+        await page.goto(refreshUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+        await new Promise(r => setTimeout(r, 2000));
+
+        // Verify cookies refreshed
+        const allCookies = await this._context.cookies();
+        const tmCookies = allCookies.filter(c => c.domain.includes('ticketmaster'));
+        const refreshMs = Date.now() - refreshStart;
+
+        console.log(`[PagePool] Cookie refresh done in ${refreshMs}ms — ${tmCookies.length} TM cookies`);
+
+        this._lastCookieRefresh = Date.now();
+        this._consecutiveErrors = 0;
+
+        if (usedPoolPage) {
+          // Put the page back in the pool
+          this.release(page);
+        } else {
+          // Close the temporary page
+          await page.close().catch(() => {});
+        }
+      } catch (navError) {
+        console.warn(`[PagePool] Cookie refresh navigation failed: ${navError.message}`);
+        if (usedPoolPage) {
+          // Page might be dead — try to recover
+          if (navError.message?.includes('Target closed') || navError.message?.includes('crashed')) {
+            this._removePage(page);
+          } else {
+            this.release(page);
+          }
+        } else {
+          await page.close().catch(() => {});
+        }
+      }
+    } catch (error) {
+      console.error(`[PagePool] Cookie refresh error: ${error.message}`);
+    } finally {
+      this._isRefreshingCookies = false;
+    }
+  }
+
+  /**
+   * Track errors from batch results. If too many 403s pile up,
+   * trigger an early cookie refresh.
+   */
+  trackError(status) {
+    if (status === 403) {
+      this._consecutiveErrors++;
+      if (this._consecutiveErrors >= 3 && !this._isRefreshingCookies) {
+        console.log(`[PagePool] ${this._consecutiveErrors} consecutive 403s — triggering early cookie refresh`);
+        this._refreshCookies('403-errors').catch(() => {});
+      }
+    } else if (status >= 200 && status < 400) {
+      this._consecutiveErrors = 0;
+    }
+  }
+
+  /**
+   * Submit requests for ONE event. The batcher groups many events
+   * into mega-batches across pool pages automatically.
+   * Returns Promise<Array<{success, data?, error?, status}>>.
+   */
+  async submitRequests(requests) {
+    if (!this.initialized || !this._batcher) {
+      throw new Error('Pool not initialized');
+    }
+    return this._batcher.submit(requests);
+  }
+
+  async acquire(timeoutMs = 20000) {
+    if (!this.initialized || !this._browser?.isConnected()) {
+      throw new Error('Pool not initialized or browser disconnected');
+    }
+
+    if (this.available.length > 0) {
+      return this.available.pop();
+    }
+
+    // Wait for a page to be released
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        const idx = this.waiting.findIndex(w => w.resolve === resolve);
+        if (idx !== -1) this.waiting.splice(idx, 1);
+        reject(new Error('Page pool acquisition timeout'));
+      }, timeoutMs);
+      this.waiting.push({ resolve, timer });
+    });
+  }
+
+  release(page) {
+    if (!this.pages.includes(page)) return;
+    if (this.waiting.length > 0) {
+      const { resolve, timer } = this.waiting.shift();
+      clearTimeout(timer);
+      resolve(page);
+    } else {
+      this.available.push(page);
+    }
+  }
+
+  _removePage(page) {
+    let idx = this.pages.indexOf(page);
+    if (idx !== -1) this.pages.splice(idx, 1);
+    idx = this.available.indexOf(page);
+    if (idx !== -1) this.available.splice(idx, 1);
+
+    // Create replacement page and navigate before adding to pool
+    if (this._context) {
+      this._context.newPage().then(async (p) => {
+        try {
+          await p.goto('https://www.ticketmaster.com/', {
+            waitUntil: 'domcontentloaded',
+            timeout: 45000
+          });
+          if (p.url().includes('ticketmaster.com')) {
+            this.pages.push(p);
+            this.release(p);
+            console.log(`[PagePool] Replaced dead page, pool: ${this.pages.length}`);
+          } else {
+            p.close().catch(() => {});
+          }
+        } catch (e) {
+          console.warn(`[PagePool] Replacement page failed: ${e.message}`);
+          p.close().catch(() => {});
+        }
+      }).catch(() => {});
+    }
+  }
+
+  async cleanup() {
+    // Stop cookie refresh timer
+    if (this._refreshTimer) {
+      clearInterval(this._refreshTimer);
+      this._refreshTimer = null;
+    }
+
+    if (this._batcher) {
+      this._batcher.cleanup();
+      this._batcher = null;
+    }
+    for (const w of this.waiting) clearTimeout(w.timer);
+    this.waiting = [];
+
+    await Promise.allSettled(this.pages.map(p => p.close().catch(() => {})));
+    this.pages = [];
+    this.available = [];
+    this.initialized = false;
+    this._initPromise = null;
+  }
+
+  get stats() {
+    const cookieAgeMin = Math.round((Date.now() - this._lastCookieRefresh) / 60000);
+    return {
+      total: this.pages.length,
+      available: this.available.length,
+      inUse: this.pages.length - this.available.length,
+      waiting: this.waiting.length,
+      batcherQueue: this._batcher?.queue.length || 0,
+      activeFlushes: this._batcher?._activeFlushes || 0,
+      initialized: this.initialized,
+      cookieAgeMinutes: cookieAgeMin,
+      consecutiveErrors: this._consecutiveErrors,
+      isRefreshingCookies: this._isRefreshingCookies
+    };
+  }
+}
+
+// Global page pool instance — 5 pages for parallel batching
+// 5 pages × 25 events/batch = 125 events per cycle ≈ 60-80 events/sec
+const browserPagePool = new BrowserPagePool(5);
+
 /**
  * Clean up browser resources
  */
 async function cleanup() {
+  // Clean up page pool first
+  await browserPagePool.cleanup();
+
   // Clean up main browser
   if (browser) {
     try {
@@ -1107,5 +1629,7 @@ export {
   initApiBrowserContext,
   browserApiRequest,
   cleanupApiBrowser,
-  isApiBrowserAvailable
+  isApiBrowserAvailable,
+  // Page pool for high-throughput parallel requests
+  browserPagePool
 };

@@ -167,8 +167,8 @@ export class ScraperManager {
 
     // Enhanced throttled ScrapeEvent for parallel processing
     this.throttledScrapeEvent = pThrottle({
-      limit: config.CONCURRENT_LIMIT, // 5 concurrent scrapes
-      interval: 100, // Minimal interval for maximum throughput
+      limit: 500, // High limit — pool batcher is the real concurrency control
+      interval: 50, // Near-instant — don't throttle, let the batcher queue
       strict: false, // Allow bursts for better throughput
     })(ScrapeEvent);
 
@@ -301,11 +301,9 @@ export class ScraperManager {
       // Start performance monitoring
       this.startPerformanceMonitoring();
 
-      // Start session health monitoring
-      this.startSessionHealthMonitoring();
-
-      // Start cookie rotation
-      this.forcePeriodicCookieRotation();
+      // Cookie refresh, session rotation, and header refresh are all REMOVED.
+      // The browser page pool navigates to a real event page and gets authentic
+      // cookies automatically. fetch() with credentials:'include' sends them.
 
       // Start failure tracking cleanup (every 10 minutes)
       setInterval(() => {
@@ -1952,57 +1950,26 @@ export class ScraperManager {
    * Schedules automatic cookie and session refresh every 20 minutes
    */
   forcePeriodicCookieRotation() {
-    // Clear any existing interval
-    if (this.cookieRotationIntervalId) {
-      clearInterval(this.cookieRotationIntervalId);
-    }
-
-    this.logWithTime(
-      "Starting 20-minute cookie and session rotation schedule",
-      "info"
-    );
-
-    // Immediately rotate on start (non-blocking)
-    this.rotateAllCookiesAndSessions().catch((err) => {
-      this.logWithTime(
-        `Initial cookie rotation error: ${err.message}`,
-        "error"
-      );
-    });
-
-    // Set up rotation interval (20 minutes)
-    this.cookieRotationIntervalId = setInterval(() => {
-      // Non-blocking rotation
-      this.rotateAllCookiesAndSessions().catch((err) => {
-        this.logWithTime(
-          `Periodic cookie rotation error: ${err.message}`,
-          "error"
-        );
-      });
-    }, SESSION_REFRESH_INTERVAL);
-
-    return this.cookieRotationIntervalId;
+    // NO-OP: Cookie rotation removed. Browser page pool handles cookies
+    // automatically by navigating to real event pages.
+    return null;
   }
 
   /**
    * Rotates all cookies and sessions to ensure freshness
    */
   async rotateAllCookiesAndSessions() {
-    // Make the entire process non-blocking by wrapping in a Promise with timeout
+    // NO-OP: Cookie/session rotation removed. Browser page pool handles cookies.
+    return true;
+  }
+
+  async _rotateAllCookiesAndSessions_DISABLED() {
     return new Promise(async (resolve) => {
-      // Set a maximum timeout for the entire rotation process
-      const rotationTimeout = setTimeout(() => {
-        this.logWithTime(
-          "Cookie and session rotation timed out after 2 minutes - continuing operation",
-          "warning"
-        );
+      const rotationTimeout = global.setTimeout(() => {
         resolve(false);
-      }, 120000); // 2 minute timeout
+      }, 120000);
 
       try {
-        this.logWithTime("Performing full cookie and session rotation", "info");
-
-        // Clear header cache to force refresh
         this.headersCache.clear();
         this.headerRefreshTimestamps.clear();
 
@@ -2370,7 +2337,7 @@ export class ScraperManager {
 
               // Small stagger delay between batches
               if (batches.indexOf(batch) < batches.length - 1) {
-                await setTimeout(100 + Math.random() * 100);
+                await setTimeout(50);  // Minimal gap — batcher handles queuing
               }
 
               // Break if circuit breaker should open
@@ -2385,19 +2352,16 @@ export class ScraperManager {
           }
 
           // Adaptive delay between processing cycles
-          let nextCycleDelay = config.PROCESSING_INTERVAL;
+          let nextCycleDelay = 100; // Fast cycling — pool batcher handles throughput
 
           if (consecutiveFailures > 3) {
-            nextCycleDelay = config.PROCESSING_INTERVAL * 2;
+            nextCycleDelay = 500;
             this.logWithTime(
               `Slowing down due to ${consecutiveFailures} failures`,
               "warning"
             );
-          } else if (consecutiveFailures === 0) {
-            nextCycleDelay = Math.max(50, config.PROCESSING_INTERVAL * 0.5);
           }
 
-          nextCycleDelay += Math.random() * 50;
           await setTimeout(nextCycleDelay);
         } else {
           // No events to process, wait before checking again
@@ -2693,118 +2657,25 @@ export class ScraperManager {
     let proxy = null;
 
     try {
-      // Check if we should skip due to recent processing
-      const lastProcessed = this.eventLastProcessedTime.get(eventId);
-      const minInterval = 3000 + Math.random() * 2000; // 3-5 seconds
-      if (lastProcessed && Date.now() - lastProcessed < minInterval) {
-        this.logWithTime(
-          `Skipping event ${eventId} - processed recently`,
-          "info"
-        );
-        return true;
-      }
-
-      // Check cooldown with some tolerance
+      // Check cooldown
       const cooldownEnd = this.cooldownEvents.get(eventId);
       if (cooldownEnd && Date.now() < cooldownEnd) {
-        const remainingCooldown = Math.round((cooldownEnd - Date.now()) / 1000);
-        this.logWithTime(
-          `Event ${eventId} still in cooldown for ${remainingCooldown}s`,
-          "info"
-        );
         return false;
       }
 
-      // Get proxy with retry logic
-      let proxyAttempts = 0;
-      const maxProxyAttempts = 3;
-
-      while (proxyAttempts < maxProxyAttempts && !proxy) {
-        try {
-          const proxyData = this.proxyManager.getProxyForEvent(eventId);
-          if (proxyData) {
-            const proxyAgentData =
-              this.proxyManager.createProxyAgent(proxyData);
-            proxyAgent = proxyAgentData.proxyAgent;
-            proxy = proxyAgentData.proxy;
-            this.proxyManager.assignProxyToEvent(eventId, proxy.proxy);
-            break;
-          }
-        } catch (proxyError) {
-          proxyAttempts++;
-          this.logWithTime(
-            `Proxy attempt ${proxyAttempts} failed for ${eventId}: ${proxyError.message}`,
-            "warning"
-          );
-          if (proxyAttempts < maxProxyAttempts) {
-            await setTimeout(300 * proxyAttempts); // Quick progressive delay
-          }
-        }
-      }
-
-      if (!proxy) {
-        throw new Error("Failed to obtain proxy after multiple attempts");
-      }
-
-      // Get headers with natural retry behavior
-      let headers = null;
-      let headerAttempts = 0;
-      const maxHeaderAttempts = 3;
-
-      while (headerAttempts < maxHeaderAttempts && !headers) {
-        try {
-          const randomEventId = await this.getRandomEventId(eventId);
-          headers = await this.refreshEventHeaders(randomEventId, false);
-
-          if (headers) {
-            // Add natural headers and identifiers
-            if (headers.headers) {
-              headers.headers["X-Event-ID"] = eventId;
-              headers.headers[
-                "X-Session-ID"
-              ] = `natural-${eventId}-${Date.now()}`;
-              headers.headers["X-Request-ID"] = `req-${Math.random()
-                .toString(36)
-                .substring(2)}`;
-              headers.headers["X-Processing-Time"] = Date.now().toString();
-              headers.headers["X-Natural-Timing"] = "true";
-
-              // Add realistic user-agent rotation
-              if (Math.random() < 0.1) {
-                // 10% chance to vary user agent
-                headers.headers["User-Agent"] = this.getRandomUserAgent();
-              }
-            }
-            break;
-          }
-        } catch (headerError) {
-          headerAttempts++;
-          this.logWithTime(
-            `Header attempt ${headerAttempts} failed for ${eventId}: ${headerError.message}`,
-            "warning"
-          );
-          if (headerAttempts < maxHeaderAttempts) {
-            await setTimeout(500 * headerAttempts); // Quick progressive delay
-          }
-        }
-      }
-
-      if (!headers) {
-        throw new Error("Failed to obtain headers after multiple attempts");
-      }
-
-      // Create event object with natural session data
+      // Pool handles proxy/cookies/TLS — no per-event proxy needed.
+      // Just pass event directly to ScrapeEvent.
       const eventWithNaturalSession = {
         eventId: eventId,
-        headers: headers,
-        sessionId: `natural-${eventId}-${Date.now()}`,
-        proxyId: proxy?.proxy || "default",
+        headers: null,
+        sessionId: `pool-${eventId}-${Date.now()}`,
+        proxyId: "pool",
         processingStart: startTime,
         naturalBehavior: true,
       };
 
       // Perform scrape with timeout
-      const extendedTimeout = (config.SCRAPE_TIMEOUT || 30000) + 5000; // Extra 5s
+      const extendedTimeout = (config.SCRAPE_TIMEOUT || 30000) + 5000;
 
       const result = await Promise.race([
         this.throttledScrapeEvent(eventWithNaturalSession, proxyAgent, proxy),
@@ -2851,17 +2722,6 @@ export class ScraperManager {
       this.failedEvents.delete(eventId);
       this.clearFailureCount(eventId);
 
-      // Release proxy with success flag
-      if (proxy) {
-        this.proxyManager.releaseProxy(eventId, true);
-      }
-
-      const processingTime = Date.now() - startTime;
-      this.logWithTime(
-        `✅ Natural processing completed for ${eventId} in ${processingTime}ms`,
-        "success"
-      );
-
       return result;
     } catch (error) {
       // Enhanced error handling with context
@@ -2879,24 +2739,14 @@ export class ScraperManager {
         const delayUntil = error.delayUntil || (Date.now() + 30000);
         this.cooldownEvents.set(eventId, delayUntil);
         
-        // Release proxy but don't mark as failed
-        if (proxy) {
-          this.proxyManager.releaseProxy(eventId, true); // Mark as success to not penalize proxy
-        }
-        
         // Return false to retry later, but don't count as a failure
         return false;
       }
       
       this.logWithTime(
-        `❌ Natural processing failed for ${eventId} after ${processingTime}ms: ${error.message}`,
+        `❌ Failed ${eventId} after ${processingTime}ms: ${error.message}`,
         "error"
       );
-
-      // Release proxy on failure
-      if (proxy) {
-        this.proxyManager.releaseProxy(eventId, false);
-      }
 
       // Don't immediately fail - let the graceful handler decide
       return false;
@@ -2951,39 +2801,7 @@ export class ScraperManager {
         );
       }
 
-      // Force fresh headers for each event to ensure unique sessions
-      const randomEventId = await this.getRandomEventId(eventId);
-      const headers = await this.refreshEventHeaders(randomEventId, false);
-
-      if (!headers) {
-        throw new Error("Failed to obtain unique headers");
-      }
-
-      // Add unique identifiers to headers to ensure no sharing
-      if (headers.headers) {
-        headers.headers["X-Event-ID"] = eventId;
-        headers.headers["X-Session-ID"] = `session-${eventId}-${Date.now()}`;
-        headers.headers["X-Unique-Request"] = `${eventId}-${Math.random()
-          .toString(36)
-          .substring(2)}`;
-        headers.headers["X-Processing-Time"] = Date.now().toString();
-        // Add retry count to headers for tracking
-        if (retryCount > 0) {
-          headers.headers["X-Retry-Count"] = retryCount.toString();
-          headers.headers[
-            "X-Retry-ID"
-          ] = `retry-${eventId}-${retryCount}-${Date.now()}`;
-        }
-      }
-
-      // Create event object with unique session data
-      const eventWithUniqueSession = {
-        eventId: eventId,
-        headers: headers,
-        sessionId: `unique-${eventId}-${Date.now()}-retry${retryCount}`,
-        proxyId: proxy?.proxy || "default",
-        retryCount: retryCount,
-      };
+      // No header/cookie refresh needed — browser page pool has authentic cookies.\n      const eventWithUniqueSession = {\n        eventId: eventId,\n        headers: null,\n        sessionId: `pool-${eventId}-${Date.now()}-retry${retryCount}`,\n        proxyId: proxy?.proxy || \"default\",\n        retryCount: retryCount,\n      };
 
       // Quick scrape with shorter timeout and unique session using throttled function
       const result = await Promise.race([
@@ -3563,17 +3381,7 @@ export class ScraperManager {
       const eventsPerMinute = stats.eventsUpdatedLast1Min;
       const memoryMB = Math.round(stats.memoryUsage.heapUsed / 1024 / 1024);
 
-      // Get CSV stats synchronously
       let csvInfo = "";
-      try {
-        const { getInventoryStats } = await import(
-          "./controllers/inventoryController.js"
-        );
-        const csvStats = getInventoryStats();
-        csvInfo = ` | CSV: ${csvStats.totalEvents} events, ${csvStats.totalRecords} records in memory`;
-      } catch (error) {
-        csvInfo = " | CSV: Stats unavailable";
-      }
 
       this.logWithTime(
         `Performance: ${stats.eventsUpdatedLast3Min}/${stats.totalEvents} events updated in 3min | ` +
@@ -3595,21 +3403,7 @@ export class ScraperManager {
           "warning"
         );
 
-        // Trigger cleanup of old events
-        try {
-          const { cleanupOldEvents } = await import(
-            "./controllers/inventoryController.js"
-          );
-          const cleaned = cleanupOldEvents(0.5); // Clean events older than 12 hours
-          if (cleaned > 0) {
-            this.logWithTime(
-              `Cleaned up ${cleaned} old events from memory`,
-              "info"
-            );
-          }
-        } catch (cleanupError) {
-          console.error(`Error during memory cleanup: ${cleanupError.message}`);
-        }
+        // inventoryController cleanup removed
       }
 
       if (stats.criticalEvents.length > 0) {
@@ -3638,62 +3432,7 @@ export class ScraperManager {
    * Start session health monitoring to detect and handle session failures
    */
   startSessionHealthMonitoring() {
-    this.logWithTime(
-      "Starting session health monitoring (5-minute cycles)",
-      "info"
-    );
-
-    setInterval(async () => {
-      try {
-        const sessionStats = this.sessionManager.getSessionStats();
-        const totalSessions = sessionStats.total;
-        const invalidSessions = sessionStats.invalid;
-
-        if (totalSessions === 0) {
-          this.logWithTime(
-            "No sessions available - forcing session creation",
-            "warning"
-          );
-          await this.sessionManager.forceSessionRotation();
-          return;
-        }
-
-        const invalidPercentage = (invalidSessions / totalSessions) * 100;
-
-        this.logWithTime(
-          `Session Health: ${
-            totalSessions - invalidSessions
-          }/${totalSessions} valid (${invalidPercentage.toFixed(1)}% invalid)`,
-          invalidPercentage > 30 ? "warning" : "info"
-        );
-
-        // Force rotation if more than 30% of sessions are invalid
-        if (invalidPercentage > 30) {
-          this.logWithTime(
-            `High session failure rate detected (${invalidPercentage.toFixed(
-              1
-            )}%) - forcing graceful rotation`,
-            "warning"
-          );
-
-          try {
-            await this.sessionManager.rotateSessionGracefully();
-            this.logWithTime("Graceful session rotation completed", "success");
-          } catch (rotationError) {
-            this.logWithTime(
-              `Graceful rotation failed, attempting force rotation: ${rotationError.message}`,
-              "error"
-            );
-            await this.sessionManager.forceSessionRotation();
-          }
-        }
-      } catch (error) {
-        this.logWithTime(
-          `Session health monitoring error: ${error.message}`,
-          "error"
-        );
-      }
-    }, 300000); // 5 minutes
+    // NO-OP: Session health monitoring removed. Browser page pool handles sessions.
   }
 
   /**
@@ -3913,8 +3652,8 @@ export class ScraperManager {
       // Get current time
       const currentTime = now.valueOf();
 
-      // Process up to 100 events normally
-      let maxEventsToProcess = 100;
+      // No cap — return ALL events needing update so the pool batcher
+      // can process them all in one cycle (~1000 events in <60s)
 
       // Calculate priority for each event and filter those needing updates
       const eventsNeedingUpdate = [];
@@ -3994,12 +3733,8 @@ export class ScraperManager {
       // Sort by priority (highest first)
       eventsNeedingUpdate.sort((a, b) => b.priorityScore - a.priorityScore);
 
-      // Return events that need updating, limited to maxEventsToProcess
+      // Return ALL events that need updating — pool batcher handles throughput
       const eventsToReturn = eventsNeedingUpdate.map((event) => event.eventId);
-
-      if (eventsToReturn.length > maxEventsToProcess) {
-        return eventsToReturn.slice(0, maxEventsToProcess);
-      }
 
       return eventsToReturn;
     } catch (error) {

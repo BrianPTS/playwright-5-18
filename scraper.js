@@ -26,7 +26,8 @@ import {
   browserApiRequest,
   initApiBrowserContext,
   isApiBrowserAvailable,
-  cleanupApiBrowser
+  cleanupApiBrowser,
+  browserPagePool
 } from './browser-cookies.js';
 
 // Flag to control whether to use browser-based API requests (bypasses TLS fingerprinting)
@@ -699,10 +700,6 @@ const ScrapeEvent = async (
       return false;
     }
 
-    console.log(
-      `Starting event ${eventId} processing with correlation ID: ${correlationId}`
-    );
-
     // Initialize rate limiting tracking with improved limits
     if (!ScrapeEvent.rateLimits) {
       ScrapeEvent.rateLimits = {
@@ -797,105 +794,32 @@ const ScrapeEvent = async (
       proxy = proxyData.proxy;
     }
 
-    console.log(`Processing event ${eventId} with unique session and headers`);
-    useProvidedHeaders = false; // Always use fresh headers
+    // Browser pool handles cookies, TLS, and user-agent.
+    // Only need minimal headers that filterForBrowser allows through.
+    cookieString = '';
+    capturedCookies = [];
 
-    if (!useProvidedHeaders) {
-      // Standard flow - get cookies and headers
-      try {
-        const capturedData = await getCapturedData(eventId, proxy);
-
-        if (!capturedData) {
-          throw new Error("Failed to get captured data");
-        }
-
-        // **COOKIE REFRESH SUCCESS GUARD**
-        // Check if cookie refresh was successful by validating critical cookies
-        if (capturedData.cookies && capturedData.cookies.length > 0) {
-          // Check for critical tmpt cookie
-          const hasTmptCookie = capturedData.cookies.some(cookie => cookie.name === 'tmpt');
-          const criticalCookies = ['tmpt', 'TMUO', 'TMPS', 'TM_TKTS', 'SESSION'];
-          const foundCriticalCookies = capturedData.cookies.filter(cookie => 
-            criticalCookies.includes(cookie.name)
-          );
-          
-          console.log(`✓ Cookie refresh successful for event ${eventId}: ${capturedData.cookies.length} cookies captured`);
-          console.log(`✓ Critical cookies found: ${foundCriticalCookies.map(c => c.name).join(', ')} (tmpt: ${hasTmptCookie ? 'YES' : 'NO'})`);
-          
-          if (!hasTmptCookie) {
-            console.error(`❌ CRITICAL: tmpt cookie missing for event ${eventId}! Cannot proceed without authentication cookies.`);
-            console.error(`Available cookies: ${capturedData.cookies.map(c => c.name).join(', ')}`);
-            throw new Error("Cookie refresh failed: Critical tmpt cookie not found - stopping event processing");
-          }
-        } else {
-          console.error(`❌ Cookie refresh failed for event ${eventId}: No cookies captured - cannot proceed with event scraping`);
-          console.error(`❌ STOPPING EVENT PROCESSING: Valid cookies are required for authentication`);
-          throw new Error("Cookie refresh failed: No valid cookies available - event processing stopped");
-        }
-
-        if (!capturedData?.cookies?.length) {
-          throw new Error("Failed to capture cookies");
-        }
-
-        // Store cookies for browser-based API requests
-        capturedCookies = capturedData.cookies;
-
-        cookieString = capturedData.cookies
-          .map((cookie) => `${cookie.name}=${cookie.value}`)
-          .join("; ");
-
-        // Generate enhanced fingerprint instead of the basic one
-        fingerprint = generateEnhancedFingerprint();
-        userAgent =
-          fingerprint.browser?.userAgent ||
-          randomUseragent.getRandom(
-            (ua) => ua.browserName === fingerprint.browser?.name
-          ) ||
-          getRealisticIphoneUserAgent();
-      } catch (error) {
-        console.error(`Error getting captured data: ${error.message}`);
-        throw error;
-      }
-    }
-
-    // Define API URLs for header optimization
-    const mapUrl = `https://mapsapi.tmol.io/maps/geometry/3/event/${eventId}/placeDetailNoKeys?useHostGrids=true&app=CCP&sectionLevel=true&systemId=HOST`;
-    const facetUrl = `https://services.ticketmaster.com/api/ismds/event/${eventId}/facets?by=section+shape+attributes+available+accessibility+offer+inventoryTypes+offerTypes+description&show=places+inventoryTypes+offerTypes&embed=offer&embed=description&q=available&compress=places&resaleChannelId=internal.ecommerce.consumer.desktop.web.browser.ticketmaster.us&apikey=b462oi7fic6pehcdkzony5bxhe&apisecret=pquzpfrfz7zd2ylvtz3w5dtyse`;
-
-    // Generate API-specific headers using our improved rotation system
-    const mapHeaders = HeaderRotation.getRotatedHeaders(fingerprint, cookieString, mapUrl);
-    const facetHeaders = HeaderRotation.getRotatedHeaders(fingerprint, cookieString, facetUrl);
-
-    // Validate and fix headers
-    const validatedMapHeaders = HeaderValidator.fixHeaders(mapHeaders, mapUrl);
-    const validatedFacetHeaders = HeaderValidator.fixHeaders(facetHeaders, facetUrl);
-
-    // Log header quality for monitoring
-    const mapScore = HeaderValidator.getQualityScore(validatedMapHeaders, mapUrl);
-    const facetScore = HeaderValidator.getQualityScore(validatedFacetHeaders, facetUrl);
-    
-    if (mapScore < 80 || facetScore < 80) {
-      console.log(`Header quality - Map: ${mapScore}, Facet: ${facetScore} for event ${eventId}`);
-    }
-
-    // Create safe header objects that match the expected format
+    // Build minimal headers directly — no need for fingerprint/rotation/validation
+    // The pool's page.evaluate(fetch()) only uses these allowed headers anyway
     const MapHeader = {
-      ...validatedMapHeaders,
-      "X-Request-ID": generateCorrelationId() + `-${Date.now()}`,
+      "accept": "application/json, text/plain, */*",
+      "accept-language": "en-US,en;q=0.9",
+      "cache-control": "no-cache",
+      "pragma": "no-cache",
+      "X-Request-ID": correlationId + `-map-${Date.now()}`,
       "X-Correlation-ID": correlationId,
     };
 
     const FacetHeader = {
-      ...validatedFacetHeaders,
+      "accept": "application/json, text/plain, */*",
+      "accept-language": "en-US,en;q=0.9",
+      "cache-control": "no-cache",
+      "pragma": "no-cache",
       "tmps-correlation-id": correlationId,
       "X-Api-Key": "b462oi7fic6pehcdkzony5bxhe",
-      "X-Request-ID": generateCorrelationId() + `-${Date.now()}`,
+      "X-Request-ID": correlationId + `-facet-${Date.now()}`,
       "X-Correlation-ID": correlationId,
     };
-
-    console.log(
-      `Starting event scraping for ${eventId} with unique session and enhanced headers...`
-    );
 
     // Measure API call time for performance monitoring
     const apiStartTime = Date.now();
@@ -912,7 +836,7 @@ const ScrapeEvent = async (
     const apiDuration = Date.now() - apiStartTime;
 
     console.log(
-      `Event ${eventId} processing completed in ${
+      `Event ${eventId} completed in ${
         Date.now() - startTime
       }ms (API: ${apiDuration}ms)`
     );
@@ -920,10 +844,9 @@ const ScrapeEvent = async (
     // If API call was too fast, it might be suspicious (rate limited or blocked)
     if (apiDuration < 100 && !result) {
       console.warn(
-        `Suspiciously fast API failure for event ${eventId} (${apiDuration}ms). Possible rate limiting detected.`
+        `Suspiciously fast API failure for event ${eventId} (${apiDuration}ms). Possible rate limiting.`
       );
-      // Implement a temporary rate limiting backoff (1 minute)
-      ScrapeEvent.rateLimits.blockedUntil = Date.now() + 60 * 1000;
+      // Don't global-block on a single fast failure — tracked via pool.trackError instead
     }
 
     return result;
@@ -971,41 +894,21 @@ async function callTicketmasterAPI(facetHeader, proxyAgent, eventId, event, mapH
   // Add a fallback for startTime if not provided
   startTime = startTime || Date.now();
   
-  // Track API rate limits globally
-  if (!callTicketmasterAPI.rateLimits) {
-    callTicketmasterAPI.rateLimits = {
-      window: 60 * 1000, // 1 minute window
-      maxPerWindow: 2000, // High limit for 1000+ events
-      requests: [], // Array to track request timestamps
-      lastWarning: 0
-    };
+  // Rate limit tracking (lightweight counter, no array)
+  if (!callTicketmasterAPI._callCount) {
+    callTicketmasterAPI._callCount = 0;
+    callTicketmasterAPI._windowStart = Date.now();
+  }
+  callTicketmasterAPI._callCount++;
+  // Reset counter every minute
+  if (Date.now() - callTicketmasterAPI._windowStart > 60000) {
+    callTicketmasterAPI._callCount = 0;
+    callTicketmasterAPI._windowStart = Date.now();
   }
   
-  // Add current request to tracking
-  callTicketmasterAPI.rateLimits.requests.push(Date.now());
+  // Dynamic delay removed — page pool handles concurrency naturally
   
-  // Remove requests older than the window
-  const windowStart = Date.now() - callTicketmasterAPI.rateLimits.window;
-  callTicketmasterAPI.rateLimits.requests = callTicketmasterAPI.rateLimits.requests.filter(
-    timestamp => timestamp >= windowStart
-  );
-  
-  // Check if we're approaching rate limits
-  const requestCount = callTicketmasterAPI.rateLimits.requests.length;
-  const limitPercentage = requestCount / callTicketmasterAPI.rateLimits.maxPerWindow;
-  
-  if (limitPercentage > 0.8 && Date.now() - callTicketmasterAPI.rateLimits.lastWarning > 30000) {
-    console.warn(`API rate limit threshold approaching: ${requestCount}/${callTicketmasterAPI.rateLimits.maxPerWindow} requests (${Math.round(limitPercentage * 100)}%)`);
-    callTicketmasterAPI.rateLimits.lastWarning = Date.now();
-  }
-  
-  // Add dynamic delay based on current rate limit usage
-  if (limitPercentage > 0.5) {
-    const dynamicDelay = Math.floor(limitPercentage * 2000); // up to 2 seconds delay at high usage
-    await delay(dynamicDelay);
-  }
-  
-  // Browser-based request function (bypasses TLS fingerprinting)
+  // Browser-based request function (bypasses TLS fingerprinting) — LEGACY, kept as fallback
   const makeBrowserRequest = async (url, headers, proxy, cookies) => {
     try {
       // Add minimal delay for natural behavior
@@ -1119,25 +1022,73 @@ async function callTicketmasterAPI(facetHeader, proxyAgent, eventId, event, mapH
     // Parse cookies from header for browser-based requests
     const cookies = cookiesArray || [];
     
-    // Try map API
-    try {
-      const mapResponse = await makeRequest(mapUrlWithParams, safeMapHeader || safeFacetHeader, proxyAgent, proxyData, cookies);
-      DataMap = mapResponse.body || mapResponse;
-    } catch (mapError) {
-      console.log(`Map API failed for event ${eventId}: ${mapError.message}`);
-      DataMap = null;
+    // Filter headers for browser fetch compatibility (browser handles sec-*, user-agent, cookie automatically)
+    const filterForBrowser = (headers) => {
+      const filtered = {};
+      const allowed = ['accept', 'accept-language', 'cache-control', 'pragma',
+        'x-api-key', 'x-request-id', 'x-correlation-id', 'tmps-correlation-id'];
+      for (const [key, value] of Object.entries(headers)) {
+        if (key.toLowerCase().startsWith('sec-') ||
+            ['user-agent', 'cookie', 'connection', 'host'].includes(key.toLowerCase())) continue;
+        if (typeof value === 'string' && allowed.includes(key.toLowerCase())) {
+          filtered[key] = value;
+        }
+      }
+      return filtered;
+    };
+
+    // Initialize page pool if needed — pass eventId so seed page visits a real event
+    if (!browserPagePool.initialized) {
+      try {
+        await browserPagePool.init(proxyData, cookies, eventId);
+      } catch (poolInitError) {
+        console.warn(`[PagePool] Init failed, falling back to single-page: ${poolInitError.message}`);
+      }
     }
-    
-    // Add minimal delay between requests
-    await delay(50 + Math.random() * 200);
-    
-    // Try facet API
-    try {
-      const facetResponse = await makeRequest(facetUrlWithParams, safeFacetHeader, proxyAgent, proxyData, cookies);
-      DataFacets = facetResponse.body || facetResponse;
-    } catch (facetError) {
-      console.log(`Facet API failed for event ${eventId}: ${facetError.message}`);
-      DataFacets = null;
+
+    // Submit this event's 2 requests to the batcher.
+    // The batcher auto-groups ~25 events into one page.evaluate(Promise.all(...))
+    // call, so 5 pages × 25 events = 125 events processed per cycle.
+    if (browserPagePool.initialized) {
+      try {
+        const batchResults = await browserPagePool.submitRequests([
+          { url: mapUrlWithParams, headers: filterForBrowser(safeMapHeader || safeFacetHeader) },
+          { url: facetUrlWithParams, headers: filterForBrowser(safeFacetHeader) }
+        ]);
+
+        DataMap = batchResults[0]?.success ? batchResults[0].data : null;
+        DataFacets = batchResults[1]?.success ? batchResults[1].data : null;
+
+        if (!batchResults[0]?.success) console.log(`Map API failed for event ${eventId}: ${batchResults[0]?.error}`);
+        if (!batchResults[1]?.success) console.log(`Facet API failed for event ${eventId}: ${batchResults[1]?.error}`);
+      } catch (batchError) {
+        console.log(`Batch request failed for event ${eventId}: ${batchError.message}`);
+        if (batchError.message?.includes('not initialized') ||
+            batchError.message?.includes('disconnected') ||
+            batchError.message?.includes('Target closed')) {
+          browserPagePool.initialized = false;
+        }
+        DataMap = null;
+        DataFacets = null;
+      }
+    } else {
+      // Fallback: single-page browser requests (sequential but still uses real TLS)
+      try {
+        const mapResult = await browserApiRequest(mapUrlWithParams,
+          filterForBrowser(safeMapHeader || safeFacetHeader), proxyData, cookies);
+        DataMap = mapResult;
+      } catch (e) {
+        console.log(`Map API failed for event ${eventId}: ${e.message}`);
+        DataMap = null;
+      }
+      try {
+        const facetResult = await browserApiRequest(facetUrlWithParams,
+          filterForBrowser(safeFacetHeader), proxyData, cookies);
+        DataFacets = facetResult;
+      } catch (e) {
+        console.log(`Facet API failed for event ${eventId}: ${e.message}`);
+        DataFacets = null;
+      }
     }
     
     // Both APIs must succeed to ensure data consistency
@@ -2280,11 +2231,7 @@ async function refreshCookiesPeriodically() {
   throw lastError; // Re-throw to be handled by the interval
 }
 
-// Start the periodic refresh when the module is loaded
-startPeriodicCookieRefresh().catch(error => {
-  console.error('Failed to start periodic cookie refresh:', error);
-  isPeriodicRefreshStarted = false; // Reset the flag on startup failure
-});
+// Cookie refresh via module auto-start is DISABLED.\n// The browser page pool navigates to real event pages and gets cookies automatically.\n// startPeriodicCookieRefresh is kept but never auto-invoked.\n// startPeriodicCookieRefresh().catch(error => {\n//   console.error('Failed to start periodic cookie refresh:', error);\n//   isPeriodicRefreshStarted = false;\n// });
 
 // Export functions that other modules need
 export { 
