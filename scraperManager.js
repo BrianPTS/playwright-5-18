@@ -167,8 +167,8 @@ export class ScraperManager {
 
     // Enhanced throttled ScrapeEvent for parallel processing
     this.throttledScrapeEvent = pThrottle({
-      limit: 500, // High limit — pool batcher is the real concurrency control
-      interval: 50, // Near-instant — don't throttle, let the batcher queue
+      limit: config.CONCURRENT_LIMIT, // 5 concurrent scrapes
+      interval: 100, // Minimal interval for maximum throughput
       strict: false, // Allow bursts for better throughput
     })(ScrapeEvent);
 
@@ -2337,7 +2337,7 @@ export class ScraperManager {
 
               // Small stagger delay between batches
               if (batches.indexOf(batch) < batches.length - 1) {
-                await setTimeout(50);  // Minimal gap — batcher handles queuing
+                await setTimeout(100 + Math.random() * 100);
               }
 
               // Break if circuit breaker should open
@@ -2352,16 +2352,19 @@ export class ScraperManager {
           }
 
           // Adaptive delay between processing cycles
-          let nextCycleDelay = 100; // Fast cycling — pool batcher handles throughput
+          let nextCycleDelay = config.PROCESSING_INTERVAL;
 
           if (consecutiveFailures > 3) {
-            nextCycleDelay = 500;
+            nextCycleDelay = config.PROCESSING_INTERVAL * 2;
             this.logWithTime(
               `Slowing down due to ${consecutiveFailures} failures`,
               "warning"
             );
+          } else if (consecutiveFailures === 0) {
+            nextCycleDelay = Math.max(50, config.PROCESSING_INTERVAL * 0.5);
           }
 
+          nextCycleDelay += Math.random() * 50;
           await setTimeout(nextCycleDelay);
         } else {
           // No events to process, wait before checking again
@@ -2657,25 +2660,72 @@ export class ScraperManager {
     let proxy = null;
 
     try {
-      // Check cooldown
+      // Check if we should skip due to recent processing
+      const lastProcessed = this.eventLastProcessedTime.get(eventId);
+      const minInterval = 3000 + Math.random() * 2000; // 3-5 seconds
+      if (lastProcessed && Date.now() - lastProcessed < minInterval) {
+        this.logWithTime(
+          `Skipping event ${eventId} - processed recently`,
+          "info"
+        );
+        return true;
+      }
+
+      // Check cooldown with some tolerance
       const cooldownEnd = this.cooldownEvents.get(eventId);
       if (cooldownEnd && Date.now() < cooldownEnd) {
+        const remainingCooldown = Math.round((cooldownEnd - Date.now()) / 1000);
+        this.logWithTime(
+          `Event ${eventId} still in cooldown for ${remainingCooldown}s`,
+          "info"
+        );
         return false;
       }
 
-      // Pool handles proxy/cookies/TLS — no per-event proxy needed.
-      // Just pass event directly to ScrapeEvent.
+      // Get proxy with retry logic
+      let proxyAttempts = 0;
+      const maxProxyAttempts = 3;
+
+      while (proxyAttempts < maxProxyAttempts && !proxy) {
+        try {
+          const proxyData = this.proxyManager.getProxyForEvent(eventId);
+          if (proxyData) {
+            const proxyAgentData =
+              this.proxyManager.createProxyAgent(proxyData);
+            proxyAgent = proxyAgentData.proxyAgent;
+            proxy = proxyAgentData.proxy;
+            this.proxyManager.assignProxyToEvent(eventId, proxy.proxy);
+            break;
+          }
+        } catch (proxyError) {
+          proxyAttempts++;
+          this.logWithTime(
+            `Proxy attempt ${proxyAttempts} failed for ${eventId}: ${proxyError.message}`,
+            "warning"
+          );
+          if (proxyAttempts < maxProxyAttempts) {
+            await setTimeout(300 * proxyAttempts); // Quick progressive delay
+          }
+        }
+      }
+
+      if (!proxy) {
+        throw new Error("Failed to obtain proxy after multiple attempts");
+      }
+
+      // No header/cookie refresh needed — browser page pool has authentic cookies.
+      // Just pass the event directly to ScrapeEvent.
       const eventWithNaturalSession = {
         eventId: eventId,
-        headers: null,
+        headers: null, // Not needed — browser pool handles cookies & headers
         sessionId: `pool-${eventId}-${Date.now()}`,
-        proxyId: "pool",
+        proxyId: proxy?.proxy || "default",
         processingStart: startTime,
         naturalBehavior: true,
       };
 
       // Perform scrape with timeout
-      const extendedTimeout = (config.SCRAPE_TIMEOUT || 30000) + 5000;
+      const extendedTimeout = (config.SCRAPE_TIMEOUT || 30000) + 5000; // Extra 5s
 
       const result = await Promise.race([
         this.throttledScrapeEvent(eventWithNaturalSession, proxyAgent, proxy),
@@ -2722,6 +2772,17 @@ export class ScraperManager {
       this.failedEvents.delete(eventId);
       this.clearFailureCount(eventId);
 
+      // Release proxy with success flag
+      if (proxy) {
+        this.proxyManager.releaseProxy(eventId, true);
+      }
+
+      const processingTime = Date.now() - startTime;
+      this.logWithTime(
+        `✅ Natural processing completed for ${eventId} in ${processingTime}ms`,
+        "success"
+      );
+
       return result;
     } catch (error) {
       // Enhanced error handling with context
@@ -2739,14 +2800,24 @@ export class ScraperManager {
         const delayUntil = error.delayUntil || (Date.now() + 30000);
         this.cooldownEvents.set(eventId, delayUntil);
         
+        // Release proxy but don't mark as failed
+        if (proxy) {
+          this.proxyManager.releaseProxy(eventId, true); // Mark as success to not penalize proxy
+        }
+        
         // Return false to retry later, but don't count as a failure
         return false;
       }
       
       this.logWithTime(
-        `❌ Failed ${eventId} after ${processingTime}ms: ${error.message}`,
+        `❌ Natural processing failed for ${eventId} after ${processingTime}ms: ${error.message}`,
         "error"
       );
+
+      // Release proxy on failure
+      if (proxy) {
+        this.proxyManager.releaseProxy(eventId, false);
+      }
 
       // Don't immediately fail - let the graceful handler decide
       return false;
@@ -3652,8 +3723,8 @@ export class ScraperManager {
       // Get current time
       const currentTime = now.valueOf();
 
-      // No cap — return ALL events needing update so the pool batcher
-      // can process them all in one cycle (~1000 events in <60s)
+      // Process up to 100 events normally
+      let maxEventsToProcess = 100;
 
       // Calculate priority for each event and filter those needing updates
       const eventsNeedingUpdate = [];
@@ -3733,8 +3804,12 @@ export class ScraperManager {
       // Sort by priority (highest first)
       eventsNeedingUpdate.sort((a, b) => b.priorityScore - a.priorityScore);
 
-      // Return ALL events that need updating — pool batcher handles throughput
+      // Return events that need updating, limited to maxEventsToProcess
       const eventsToReturn = eventsNeedingUpdate.map((event) => event.eventId);
+
+      if (eventsToReturn.length > maxEventsToProcess) {
+        return eventsToReturn.slice(0, maxEventsToProcess);
+      }
 
       return eventsToReturn;
     } catch (error) {

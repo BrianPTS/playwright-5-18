@@ -1094,10 +1094,10 @@ function isApiBrowserAvailable() {
 // RequestBatcher: Groups requests from MANY events into mega-batches.
 // Instead of 1 page per event (2 fetches), 1 page handles 20 events
 // (40 fetches) in a single page.evaluate(Promise.all(...)) call.
-// 5 pages × 25 events = 125 events per cycle ≈ 60-80 events/sec.
+// 8 pages × 20 events = 160 events per cycle ≈ 40-50 events/sec.
 // ====================================================
 class RequestBatcher {
-  constructor(pool, maxEventsPerBatch = 25, flushIntervalMs = 80) {
+  constructor(pool, maxEventsPerBatch = 20, flushIntervalMs = 150) {
     this.pool = pool;
     this.maxEventsPerBatch = maxEventsPerBatch;
     this.flushIntervalMs = flushIntervalMs;
@@ -1334,21 +1334,8 @@ class BrowserPagePool {
       throw e;
     }
 
-    // Create remaining pages WITHOUT navigation — they share the same context
-    // so they already have all cookies. This is instant.
-    if (this.size > 1) {
-      console.log(`[PagePool] Creating ${this.size - 1} additional page(s) (shared cookies, no navigation)`);
-      const extraPages = await Promise.all(
-        Array.from({ length: this.size - 1 }, () => context.newPage())
-      );
-      for (const p of extraPages) {
-        this.pages.push(p);
-        this.available.push(p);
-      }
-    }
-
-    // Batcher: batch size 25 events per page, flush every 80ms for throughput
-    this._batcher = new RequestBatcher(this, 25, 80);
+    // Batcher: batch size 20 events per page, flush every 100ms for throughput
+    this._batcher = new RequestBatcher(this, 20, 100);
 
     this._lastCookieRefresh = Date.now();
     this._consecutiveErrors = 0;
@@ -1586,9 +1573,8 @@ class BrowserPagePool {
   }
 }
 
-// Global page pool instance — 5 pages for parallel batching
-// 5 pages × 25 events/batch = 125 events per cycle ≈ 60-80 events/sec
-const browserPagePool = new BrowserPagePool(5);
+// Global page pool instance — 1 page for testing
+const browserPagePool = new BrowserPagePool(1);
 
 /**
  * Clean up browser resources

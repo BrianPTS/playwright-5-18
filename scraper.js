@@ -700,6 +700,10 @@ const ScrapeEvent = async (
       return false;
     }
 
+    console.log(
+      `Starting event ${eventId} processing with correlation ID: ${correlationId}`
+    );
+
     // Initialize rate limiting tracking with improved limits
     if (!ScrapeEvent.rateLimits) {
       ScrapeEvent.rateLimits = {
@@ -794,32 +798,60 @@ const ScrapeEvent = async (
       proxy = proxyData.proxy;
     }
 
-    // Browser pool handles cookies, TLS, and user-agent.
-    // Only need minimal headers that filterForBrowser allows through.
-    cookieString = '';
-    capturedCookies = [];
+    console.log(`Processing event ${eventId} — no cookie refresh, browser pool has cookies`);
 
-    // Build minimal headers directly — no need for fingerprint/rotation/validation
-    // The pool's page.evaluate(fetch()) only uses these allowed headers anyway
+    // Skip the entire cookie refresh flow.
+    // The browser page pool already visited ticketmaster.com/event/...
+    // so the browser context has authentic cookies. fetch() inside
+    // page.evaluate uses those cookies automatically via credentials:'include'.
+    fingerprint = generateEnhancedFingerprint();
+    userAgent =
+      fingerprint.browser?.userAgent ||
+      randomUseragent.getRandom(
+        (ua) => ua.browserName === fingerprint.browser?.name
+      ) ||
+      getRealisticIphoneUserAgent();
+    cookieString = ''; // Not needed — browser handles cookies
+    capturedCookies = []; // Not needed — browser handles cookies
+
+    // Define API URLs for header optimization
+    const mapUrl = `https://mapsapi.tmol.io/maps/geometry/3/event/${eventId}/placeDetailNoKeys?useHostGrids=true&app=CCP&sectionLevel=true&systemId=HOST`;
+    const facetUrl = `https://services.ticketmaster.com/api/ismds/event/${eventId}/facets?by=section+shape+attributes+available+accessibility+offer+inventoryTypes+offerTypes+description&show=places+inventoryTypes+offerTypes&embed=offer&embed=description&q=available&compress=places&resaleChannelId=internal.ecommerce.consumer.desktop.web.browser.ticketmaster.us&apikey=b462oi7fic6pehcdkzony5bxhe&apisecret=pquzpfrfz7zd2ylvtz3w5dtyse`;
+
+    // Generate API-specific headers using our improved rotation system
+    const mapHeaders = HeaderRotation.getRotatedHeaders(fingerprint, cookieString, mapUrl);
+    const facetHeaders = HeaderRotation.getRotatedHeaders(fingerprint, cookieString, facetUrl);
+
+    // Validate and fix headers
+    const validatedMapHeaders = HeaderValidator.fixHeaders(mapHeaders, mapUrl);
+    const validatedFacetHeaders = HeaderValidator.fixHeaders(facetHeaders, facetUrl);
+
+    // Log header quality for monitoring
+    const mapScore = HeaderValidator.getQualityScore(validatedMapHeaders, mapUrl);
+    const facetScore = HeaderValidator.getQualityScore(validatedFacetHeaders, facetUrl);
+    
+    if (mapScore < 80 || facetScore < 80) {
+      console.log(`Header quality - Map: ${mapScore}, Facet: ${facetScore} for event ${eventId}`);
+    }
+
+    // Create safe header objects that match the expected format
     const MapHeader = {
-      "accept": "application/json, text/plain, */*",
-      "accept-language": "en-US,en;q=0.9",
-      "cache-control": "no-cache",
-      "pragma": "no-cache",
-      "X-Request-ID": correlationId + `-map-${Date.now()}`,
+      ...validatedMapHeaders,
+      "X-Request-ID": generateCorrelationId() + `-${Date.now()}`,
       "X-Correlation-ID": correlationId,
     };
 
     const FacetHeader = {
-      "accept": "application/json, text/plain, */*",
-      "accept-language": "en-US,en;q=0.9",
-      "cache-control": "no-cache",
-      "pragma": "no-cache",
+      ...validatedFacetHeaders,
       "tmps-correlation-id": correlationId,
       "X-Api-Key": "b462oi7fic6pehcdkzony5bxhe",
-      "X-Request-ID": correlationId + `-facet-${Date.now()}`,
+      "X-Request-ID": generateCorrelationId() + `-${Date.now()}`,
       "X-Correlation-ID": correlationId,
     };
+
+    console.log(
+      `Starting event scraping for ${eventId} with unique session and enhanced headers...`
+    );
 
     // Measure API call time for performance monitoring
     const apiStartTime = Date.now();
@@ -836,7 +868,7 @@ const ScrapeEvent = async (
     const apiDuration = Date.now() - apiStartTime;
 
     console.log(
-      `Event ${eventId} completed in ${
+      `Event ${eventId} processing completed in ${
         Date.now() - startTime
       }ms (API: ${apiDuration}ms)`
     );
@@ -844,9 +876,10 @@ const ScrapeEvent = async (
     // If API call was too fast, it might be suspicious (rate limited or blocked)
     if (apiDuration < 100 && !result) {
       console.warn(
-        `Suspiciously fast API failure for event ${eventId} (${apiDuration}ms). Possible rate limiting.`
+        `Suspiciously fast API failure for event ${eventId} (${apiDuration}ms). Possible rate limiting detected.`
       );
-      // Don't global-block on a single fast failure — tracked via pool.trackError instead
+      // Implement a temporary rate limiting backoff (1 minute)
+      ScrapeEvent.rateLimits.blockedUntil = Date.now() + 60 * 1000;
     }
 
     return result;
@@ -894,16 +927,32 @@ async function callTicketmasterAPI(facetHeader, proxyAgent, eventId, event, mapH
   // Add a fallback for startTime if not provided
   startTime = startTime || Date.now();
   
-  // Rate limit tracking (lightweight counter, no array)
-  if (!callTicketmasterAPI._callCount) {
-    callTicketmasterAPI._callCount = 0;
-    callTicketmasterAPI._windowStart = Date.now();
+  // Track API rate limits globally
+  if (!callTicketmasterAPI.rateLimits) {
+    callTicketmasterAPI.rateLimits = {
+      window: 60 * 1000, // 1 minute window
+      maxPerWindow: 2000, // High limit for 1000+ events
+      requests: [], // Array to track request timestamps
+      lastWarning: 0
+    };
   }
-  callTicketmasterAPI._callCount++;
-  // Reset counter every minute
-  if (Date.now() - callTicketmasterAPI._windowStart > 60000) {
-    callTicketmasterAPI._callCount = 0;
-    callTicketmasterAPI._windowStart = Date.now();
+  
+  // Add current request to tracking
+  callTicketmasterAPI.rateLimits.requests.push(Date.now());
+  
+  // Remove requests older than the window
+  const windowStart = Date.now() - callTicketmasterAPI.rateLimits.window;
+  callTicketmasterAPI.rateLimits.requests = callTicketmasterAPI.rateLimits.requests.filter(
+    timestamp => timestamp >= windowStart
+  );
+  
+  // Check if we're approaching rate limits
+  const requestCount = callTicketmasterAPI.rateLimits.requests.length;
+  const limitPercentage = requestCount / callTicketmasterAPI.rateLimits.maxPerWindow;
+  
+  if (limitPercentage > 0.8 && Date.now() - callTicketmasterAPI.rateLimits.lastWarning > 30000) {
+    console.warn(`API rate limit threshold approaching: ${requestCount}/${callTicketmasterAPI.rateLimits.maxPerWindow} requests (${Math.round(limitPercentage * 100)}%)`);
+    callTicketmasterAPI.rateLimits.lastWarning = Date.now();
   }
   
   // Dynamic delay removed — page pool handles concurrency naturally
@@ -1047,8 +1096,8 @@ async function callTicketmasterAPI(facetHeader, proxyAgent, eventId, event, mapH
     }
 
     // Submit this event's 2 requests to the batcher.
-    // The batcher auto-groups ~25 events into one page.evaluate(Promise.all(...))
-    // call, so 5 pages × 25 events = 125 events processed per cycle.
+    // The batcher auto-groups ~20 events into one page.evaluate(Promise.all(...))
+    // call, so 10 pages × 20 events = 200 events processed per cycle.
     if (browserPagePool.initialized) {
       try {
         const batchResults = await browserPagePool.submitRequests([
