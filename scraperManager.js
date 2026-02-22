@@ -13,7 +13,7 @@ import pThrottle from 'p-throttle';
 import config from './config/scraperConfig.js';
 import _ from 'lodash';
 import InventoryApi from './utils/inventoryApi.js';
-import { cleanup as cleanupBrowsers } from './browser-cookies.js';
+import { cleanup as cleanupBrowsers, browserPagePool } from './browser-cookies.js';
 // CSV upload functionality removed
 let inventoryIdCounter = 0;
 
@@ -317,6 +317,19 @@ export class ScraperManager {
         `Started parallel event processing (${config.CONCURRENT_LIMIT} concurrent, batch size ${config.BATCH_SIZE})`,
         "success"
       );
+
+      // Pre-initialize browser page pool so the first batch doesn't burn 20-30s
+      try {
+        const proxy = global.proxyManager ? global.proxyManager.getProxyForEvent('pre-init') : null;
+        // Grab one event ID so the seed page visits a real event URL for full cookies
+        const sampleEvent = await Event.findOne({ Skip_Scraping: { $ne: true } }).select('Event_ID').lean();
+        const seedEventId = sampleEvent?.Event_ID || null;
+        this.logWithTime(`Pre-initializing browser page pool (proxy: ${proxy?.proxy || 'none'}, seed: ${seedEventId || 'homepage'})`, 'info');
+        await browserPagePool.init(proxy, null, seedEventId);
+        this.logWithTime('Browser page pool pre-initialized successfully', 'success');
+      } catch (preInitErr) {
+        this.logWithTime(`Pool pre-init failed (will lazy-init on first request): ${preInitErr.message}`, 'warning');
+      }
 
       // Main concurrent processing loop
       await this.startConcurrentProcessing();
@@ -1167,8 +1180,10 @@ export class ScraperManager {
             "debug"
           );
         }
-        // Console log for immediate visibility
-        console.log(`[DB OPERATIONS ${eventId}] Summary: ${rowsToDelete.length} DELETE, ${rowsToUpdate.length} UPDATE, ${rowsToInsert.length} INSERT, ${unchangedRows} UNCHANGED`);
+        // Console log only when there are actual DB changes
+        if (rowsToDelete.length > 0 || rowsToUpdate.length > 0 || rowsToInsert.length > 0) {
+          console.log(`[DB OPS ${eventId}] ${rowsToDelete.length}D ${rowsToUpdate.length}U ${rowsToInsert.length}I (${unchangedRows} unchanged)`);
+        }
 
         // Perform efficient updates only if there are changes
         if (
@@ -1233,7 +1248,6 @@ export class ScraperManager {
                 "debug"
               );
             }
-            console.log(`[DB DELETE ${eventId}] Removed ${rowsToDelete.length} rows from database`);
           }
 
           // Handle updates by deleting existing inventory and adding new ones
@@ -1404,7 +1418,7 @@ export class ScraperManager {
                 "debug"
               );
             }
-            console.log(`[DB UPDATE ${eventId}] Updated ${rowsToUpdate.length} rows by delete-and-insert with new inventory IDs`);
+            // DB UPDATE log already covered by summary above
           }
 
           // Insert new/updated rows with new inventory IDs
@@ -1516,34 +1530,14 @@ export class ScraperManager {
             for (let i = 0; i < groupsToInsert.length; i += BATCH_SIZE) {
               const batch = groupsToInsert.slice(i, i + BATCH_SIZE);
               try {
-                console.log(
-                  `[DEBUG] Event ${eventId} - Inserting batch ${
-                    i / BATCH_SIZE + 1
-                  } of ${Math.ceil(groupsToInsert.length / BATCH_SIZE)}`
-                );
-                console.log(
-                  `[DEBUG] Event ${eventId} - First document inHandDate:`,
-                  batch[0]?.inHandDate
-                );
                 await ConsecutiveGroup.insertMany(batch, { ordered: false, session: session });
-                console.log(
-                  `[DEBUG] Event ${eventId} - Successfully inserted batch`
-                );
               } catch (error) {
                 console.error(
                   `[ERROR] Event ${eventId} - Failed to insert ConsecutiveGroup batch:`,
                   error.message
                 );
                 // Log specific duplicate key errors for debugging
-                if (error.code === 11000 && error.writeErrors) {
-                  const duplicateErrors = error.writeErrors.filter(e => e.code === 11000);
-                  if (duplicateErrors.length > 0) {
-                    console.log(`[DEBUG] Event ${eventId} - ${duplicateErrors.length} duplicate key errors detected`);
-                    duplicateErrors.slice(0, 3).forEach((dupError, index) => {
-                      console.log(`[DEBUG] Event ${eventId} - Duplicate ${index + 1}: ${JSON.stringify(dupError.keyValue)}`);
-                    });
-                  }
-                }
+                // Duplicate key errors are expected during concurrent processing — skip verbose logging
                 // Continue with next batch even if this one fails
               }
             }
@@ -1561,13 +1555,6 @@ export class ScraperManager {
               );
             }
             console.log(`[DB INSERT ${eventId}] Added ${groupsToInsert.length} new rows to database`);
-          }
-        } else {
-          if (LOG_LEVEL >= 3) {
-            this.logWithTime(
-              `[Debug SM ${eventId}] NO CHANGES: No database operations needed - ${unchangedRows} rows remain unchanged, 0 deletes, 0 updates, 0 inserts`,
-              "debug"
-            );
           }
         }
       }
@@ -1598,10 +1585,13 @@ export class ScraperManager {
             "debug"
           );
         }
-        // Console log for event completion summary
+        // Event completion - only log slow events (>5s) or events with DB ops
         const totalOps = (rowsToDelete?.length || 0) + (rowsToUpdate?.length || 0) + (rowsToInsert?.length || 0);
-        console.log(`[EVENT COMPLETE ${eventId}] Processed in ${(performance.now() - startTime).toFixed(2)}ms - ${totalOps > 0 ? `${totalOps} DB operations` : 'No DB changes'}`);
-      });
+        const elapsed = (performance.now() - startTime).toFixed(0);
+        if (totalOps > 0 || elapsed > 5000) {
+          console.log(`[DONE ${eventId}] ${elapsed}ms - ${totalOps > 0 ? `${totalOps} ops` : 'slow'}`);
+        }
+        });
     } catch (error) {
       await this.logError(eventId, "DATABASE_ERROR", error);
       throw error;
@@ -2744,31 +2734,13 @@ export class ScraperManager {
         throw new Error("Event returned empty results - treating as failed");
       }
 
-      // Update metadata and tracking
+      // Update metadata and tracking (sets eventUpdateTimestamps + eventLastProcessedTime internally)
       await this.updateEventMetadataAsync(eventId, result);
 
-      // Success tracking with natural timing
+      // Success tracking
       this.successCount++;
       this.lastSuccessTime = moment();
       this.resetEventFailureTracking(eventId);
-      this.eventUpdateTimestamps.set(eventId, moment());
-
-      // Update database with natural timing
-      try {
-        await Event.updateOne(
-          { Event_ID: eventId },
-          { $set: { Last_Updated: new Date() } }
-        );
-      } catch (dbError) {
-        this.logWithTime(
-          `DB update warning for ${eventId}: ${dbError.message}`,
-          "warning"
-        );
-      }
-
-      // Update processed time
-      this.eventLastProcessedTime.set(eventId, Date.now());
-
       this.failedEvents.delete(eventId);
       this.clearFailureCount(eventId);
 
@@ -2984,13 +2956,7 @@ export class ScraperManager {
       this.eventUpdateTimestamps.set(eventId, moment());
       this.eventLastProcessedTime.set(eventId, Date.now());
 
-      // Update Last_Updated directly to ensure events stop appearing in getEvents()
-      await Event.updateOne(
-        { Event_ID: eventId },
-        { $set: { Last_Updated: new Date() } }
-      );
-
-      // Process full metadata update in background
+      // Process full metadata update in background (includes Last_Updated write)
       setImmediate(async () => {
         try {
           await this.updateEventMetadata(eventId, scrapeResult);
@@ -3002,7 +2968,7 @@ export class ScraperManager {
       });
     } catch (error) {
       console.error(
-        `Error updating Last_Updated for ${eventId}: ${error.message}`
+        `Error scheduling metadata update for ${eventId}: ${error.message}`
       );
     }
   }
@@ -3703,17 +3669,11 @@ export class ScraperManager {
     try {
       const now = moment();
 
-      // Find ALL active events - no limit for 1000+ events
-      // CRITICAL: Only get events where Skip_Scraping is explicitly NOT true
+      // Find ALL active events - $ne: true covers false, null, and missing fields
       const events = await Event.find({
-        $or: [
-          { Skip_Scraping: { $ne: true } },
-          { Skip_Scraping: { $exists: false } }, // Include events without the field
-          { Skip_Scraping: null },
-          { Skip_Scraping: false },
-        ],
+        Skip_Scraping: { $ne: true },
       })
-        .select("Event_ID url Last_Updated")
+        .select("Event_ID Last_Updated")
         .lean();
 
       if (!events.length) {

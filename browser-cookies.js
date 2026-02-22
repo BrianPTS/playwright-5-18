@@ -1136,7 +1136,7 @@ function isApiBrowserAvailable() {
 // 8 pages × 20 events = 160 events per cycle ≈ 40-50 events/sec.
 // ====================================================
 class RequestBatcher {
-  constructor(pool, maxEventsPerBatch = 20, flushIntervalMs = 150) {
+  constructor(pool, maxEventsPerBatch = 10, flushIntervalMs = 50) {
     this.pool = pool;
     this.maxEventsPerBatch = maxEventsPerBatch;
     this.flushIntervalMs = flushIntervalMs;
@@ -1223,6 +1223,13 @@ class RequestBatcher {
       return;
     }
 
+    // Fail fast if page was closed between acquire and evaluate
+    if (page.isClosed()) {
+      this.pool._removePage(page);
+      for (const item of batch) item.reject(new Error('Acquired page was already closed'));
+      return;
+    }
+
     try {
       const results = await page.evaluate(async (reqs) => {
         return Promise.all(reqs.map(async ({ url, headers }) => {
@@ -1258,7 +1265,7 @@ class RequestBatcher {
         batch[i].resolve(eventResults[i]);
       }
 
-      console.log(`[Batcher] Batch of ${batch.length} events (${allRequests.length} fetches) completed`);
+      // Batch completion logged at debug level only
     } catch (error) {
       // Handle dead pages
       if (error.message?.includes('Target closed') ||
@@ -1311,7 +1318,7 @@ class BrowserPagePool {
     this._consecutiveErrors = 0;
     // Proxy rotation after N requests
     this._requestsSinceRotation = 0;
-    this._proxyRotationThreshold = 50; // rotate proxy every 50 event calls (~1-2 cycles per instance)
+    this._proxyRotationThreshold = 500; // rotate proxy every 500 event calls — avoids restart thrashing
     // Store init params for restart
     this._initProxy = null;
     this._initCookies = null;
@@ -1355,6 +1362,24 @@ class BrowserPagePool {
     const { browser, context } = await initApiBrowserContext(proxy, cookies);
     this._browser = browser;
     this._context = context;
+
+    // Auto-recover if browser process crashes unexpectedly
+    browser.on('disconnected', () => {
+      if (this._isRestarting) return; // Already handling it
+      console.error('[PagePool] Browser disconnected unexpectedly — scheduling auto-restart');
+      this.initialized = false;
+      this._initPromise = null;
+      this.pages = [];
+      this.available = [];
+      // Restart after a brief pause to avoid tight loops
+      setTimeout(() => {
+        if (!this._isRestarting && !this.initialized) {
+          this._restartBrowser('browser-crash').catch(err => {
+            console.error(`[PagePool] Auto-restart after crash failed: ${err.message}`);
+          });
+        }
+      }, 2000);
+    });
 
     // Navigate one seed page to a real event page to get full cookies
     const eventUrl = eventId
@@ -1555,7 +1580,8 @@ class BrowserPagePool {
       if (this._deferredQueue.length > 0) {
         const deferred = this._deferredQueue.splice(0);
         console.log(`[PagePool] Draining ${deferred.length} deferred request(s)`);
-        for (const { requests, resolve, reject } of deferred) {
+        for (const { requests, resolve, reject, timer } of deferred) {
+          if (timer) clearTimeout(timer);
           this._batcher.submit(requests).then(resolve).catch(reject);
         }
       }
@@ -1565,7 +1591,8 @@ class BrowserPagePool {
       this.initialized = false;
       this._initPromise = null;
       // Reject all deferred
-      for (const { reject } of this._deferredQueue) {
+      for (const { reject, timer } of this._deferredQueue) {
+        if (timer) clearTimeout(timer);
         reject(new Error(`Browser restart failed: ${error.message}`));
       }
       this._deferredQueue = [];
@@ -1597,10 +1624,15 @@ class BrowserPagePool {
    * Returns Promise<Array<{success, data?, error?, status}>>.
    */
   async submitRequests(requests) {
-    // During restart — queue for replay after browser is back
+    // During restart — queue for replay after browser is back (with 30s timeout)
     if (this._isRestarting || !this.initialized || !this._batcher) {
       return new Promise((resolve, reject) => {
-        this._deferredQueue.push({ requests, resolve, reject });
+        const timer = setTimeout(() => {
+          const idx = this._deferredQueue.findIndex(d => d.resolve === resolve);
+          if (idx !== -1) this._deferredQueue.splice(idx, 1);
+          reject(new Error('Deferred queue timeout — browser restart took too long'));
+        }, 30000);
+        this._deferredQueue.push({ requests, resolve, reject, timer });
       });
     }
 
@@ -1610,9 +1642,14 @@ class BrowserPagePool {
       console.log(`[PagePool] ${this._requestsSinceRotation} requests since last rotation — rotating proxy`);
       this._requestsSinceRotation = 0;
       this._restartBrowser('proxy-rotation').catch(() => {});
-      // Queue this request for replay after restart
+      // Queue this request for replay after restart (with 30s timeout)
       return new Promise((resolve, reject) => {
-        this._deferredQueue.push({ requests, resolve, reject });
+        const timer = setTimeout(() => {
+          const idx = this._deferredQueue.findIndex(d => d.resolve === resolve);
+          if (idx !== -1) this._deferredQueue.splice(idx, 1);
+          reject(new Error('Deferred queue timeout — browser restart took too long'));
+        }, 30000);
+        this._deferredQueue.push({ requests, resolve, reject, timer });
       });
     }
 
@@ -1694,7 +1731,8 @@ class BrowserPagePool {
     this.waiting = [];
 
     // Reject deferred requests
-    for (const { reject } of this._deferredQueue) {
+    for (const { reject, timer } of this._deferredQueue) {
+      if (timer) clearTimeout(timer);
       reject(new Error('Pool cleanup'));
     }
     this._deferredQueue = [];

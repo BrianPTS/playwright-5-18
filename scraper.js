@@ -519,8 +519,6 @@ const GetData = async (headers, proxyAgent, url, eventId) => {
   try {
     const timeout = setTimeout(() => {
       abortController.abort();
-      console.log("Request aborted due to timeout");
-      console.log(eventId, "eventId");
     }, CONFIG.PAGE_TIMEOUT);
 
     try {
@@ -587,7 +585,6 @@ const GetData = async (headers, proxyAgent, url, eventId) => {
       return false;
     }
   } catch (error) {
-    console.log(error, "error");
     return false;
   }
 };
@@ -598,8 +595,6 @@ const GetProxy = async () => {
     if (global.proxyManager) {
       // Add diagnostic information about proxy count
       const availableCount = global.proxyManager.getAvailableProxyCount();
-      const totalProxies = global.proxyManager.proxies.length;
-      console.log(`Proxy status: ${availableCount}/${totalProxies} proxies available`);
       
       try {
         const proxyData = global.proxyManager.getProxyForEvent('random');
@@ -675,15 +670,12 @@ const ScrapeEvent = async (
   let proxy = externalProxy;
 
   try {
-    // Check memory usage at the start
+    // Throttled memory check — log at most every 30s to reduce noise
     const memUsage = process.memoryUsage();
-    if (memUsage.heapUsed > 1024 * 1024 * 1024) {
-      // Over 1GB
-      console.warn(
-        `High memory usage (${Math.round(
-          memUsage.heapUsed / 1024 / 1024
-        )}MB) during event processing`
-      );
+    const now = Date.now();
+    if (memUsage.heapUsed > 1024 * 1024 * 1024 && (!ScrapeEvent._lastMemWarn || now - ScrapeEvent._lastMemWarn > 30000)) {
+      ScrapeEvent._lastMemWarn = now;
+      console.warn(`High memory usage (${Math.round(memUsage.heapUsed / 1024 / 1024)}MB)`);
     }
 
     // Determine event ID from either object or simple ID
@@ -700,96 +692,19 @@ const ScrapeEvent = async (
       return false;
     }
 
-    console.log(
-      `Starting event ${eventId} processing with correlation ID: ${correlationId}`
-    );
-
-    // Initialize rate limiting tracking with improved limits
+    // Lightweight rate limiting — just track hourly count
     if (!ScrapeEvent.rateLimits) {
-      ScrapeEvent.rateLimits = {
-        hourlyCount: 0,
-        lastHour: new Date().getHours(),
-        maxPerHour: 10000, // Massively increased for 1000+ events with unique sessions
-        blockedUntil: 0,
-        domainLimits: new Map(), // Track limits per domain
-        lastRequestTime: new Map(), // Track last request time per domain
-      };
+      ScrapeEvent.rateLimits = { hourlyCount: 0, lastHour: new Date().getHours(), maxPerHour: 10000, blockedUntil: 0 };
     }
-
-    // Check rate limits to avoid overwhelming external services
     const currentHour = new Date().getHours();
     if (currentHour !== ScrapeEvent.rateLimits.lastHour) {
       ScrapeEvent.rateLimits.hourlyCount = 0;
       ScrapeEvent.rateLimits.lastHour = currentHour;
-      ScrapeEvent.rateLimits.domainLimits.clear();
     }
-
-    // Create unique domain for each event to bypass rate limiting
-    // This ensures each event is treated separately and can use its own session/proxy
-    const baseEventId = event?.eventId || eventId || 'unknown';
-    const sessionId = event?.sessionId || `session-${Date.now()}`;
-    let domain = `event-${baseEventId}-${sessionId}`;
-    
-    // Fallback to URL-based domain if needed for logging
-    if (event?.url) {
-      try {
-        const url = new URL(event.url);
-        const originalDomain = url.hostname;
-        domain = `${originalDomain}-${baseEventId}-${sessionId}`;
-      } catch (e) {
-        // Keep the unique event domain
-      }
-    }
-
-    // Initialize domain-specific rate limits if needed
-    if (!ScrapeEvent.rateLimits.domainLimits.has(domain)) {
-      ScrapeEvent.rateLimits.domainLimits.set(domain, {
-        count: 0,
-        maxPerMinute: 1000, // High limit since each event has unique domain
-        lastMinute: new Date().getMinutes(),
-      });
-    }
-
-    const domainLimits = ScrapeEvent.rateLimits.domainLimits.get(domain);
-    const currentMinute = new Date().getMinutes();
-
-    // Check domain-specific rate limits - DISABLED for high-performance mode
-    if (currentMinute !== domainLimits.lastMinute) {
-      domainLimits.count = 0;
-      domainLimits.lastMinute = currentMinute;
-    }
-
-    // BYPASS domain rate limiting when each event has unique session
-    // Each event now uses its own proxy and session, so domain limits don't apply
-    if (domainLimits.count >= domainLimits.maxPerMinute * 10) { // Increased limit 10x
-      console.warn(
-        `Domain rate limit reached for ${domain} (${domainLimits.count}/${domainLimits.maxPerMinute * 10})`
-      );
-      // Don't throw error, just log warning for monitoring
-      console.log(`Continuing with unique sessions despite domain limit for ${eventId}`);
-    }
-
-    // Check global rate limits
-    if (ScrapeEvent.rateLimits.hourlyCount >= ScrapeEvent.rateLimits.maxPerHour) {
-      console.warn(
-        `Hourly rate limit reached (${ScrapeEvent.rateLimits.hourlyCount}/${ScrapeEvent.rateLimits.maxPerHour})`
-      );
-      throw new Error("Global rate limit exceeded");
-    }
-
-    // Check global block
     if (ScrapeEvent.rateLimits.blockedUntil > Date.now()) {
-      const waitTime = Math.ceil(
-        (ScrapeEvent.rateLimits.blockedUntil - Date.now()) / 1000
-      );
-      console.warn(`Global block in effect for ${waitTime} more seconds`);
-      throw new Error(
-        `Service temporarily unavailable for ${waitTime} seconds`
-      );
+      throw new Error('Service temporarily unavailable');
     }
-
     ScrapeEvent.rateLimits.hourlyCount++;
-    domainLimits.count++;
 
     // Use provided proxy if available, otherwise get a new one
     if (!proxyAgent || !proxy) {
@@ -798,7 +713,7 @@ const ScrapeEvent = async (
       proxy = proxyData.proxy;
     }
 
-    console.log(`Processing event ${eventId} — no cookie refresh, browser pool has cookies`);
+    // Cookie refresh not needed — browser pool handles cookies
 
     // Skip the entire cookie refresh flow.
     // The browser page pool already visited ticketmaster.com/event/...
@@ -826,14 +741,6 @@ const ScrapeEvent = async (
     const validatedMapHeaders = HeaderValidator.fixHeaders(mapHeaders, mapUrl);
     const validatedFacetHeaders = HeaderValidator.fixHeaders(facetHeaders, facetUrl);
 
-    // Log header quality for monitoring
-    const mapScore = HeaderValidator.getQualityScore(validatedMapHeaders, mapUrl);
-    const facetScore = HeaderValidator.getQualityScore(validatedFacetHeaders, facetUrl);
-    
-    if (mapScore < 80 || facetScore < 80) {
-      console.log(`Header quality - Map: ${mapScore}, Facet: ${facetScore} for event ${eventId}`);
-    }
-
     // Create safe header objects that match the expected format
     const MapHeader = {
       ...validatedMapHeaders,
@@ -849,9 +756,7 @@ const ScrapeEvent = async (
       "X-Correlation-ID": correlationId,
     };
 
-    console.log(
-      `Starting event scraping for ${eventId} with unique session and enhanced headers...`
-    );
+    // Headers ready — proceeding to API call
 
     // Measure API call time for performance monitoring
     const apiStartTime = Date.now();
@@ -867,11 +772,9 @@ const ScrapeEvent = async (
     );
     const apiDuration = Date.now() - apiStartTime;
 
-    console.log(
-      `Event ${eventId} processing completed in ${
-        Date.now() - startTime
-      }ms (API: ${apiDuration}ms)`
-    );
+    if (apiDuration > 60000) {
+      console.log(`Event ${eventId} slow API: ${apiDuration}ms`);
+    }
 
     // If API call was too fast, it might be suspicious (rate limited or blocked)
     if (apiDuration < 100 && !result) {
@@ -924,44 +827,11 @@ const ScrapeEvent = async (
 
 // Simplified API call without retry logic
 async function callTicketmasterAPI(facetHeader, proxyAgent, eventId, event, mapHeader = null, startTime, proxyData = null, cookiesArray = null) {
-  // Add a fallback for startTime if not provided
   startTime = startTime || Date.now();
-  
-  // Track API rate limits globally
-  if (!callTicketmasterAPI.rateLimits) {
-    callTicketmasterAPI.rateLimits = {
-      window: 60 * 1000, // 1 minute window
-      maxPerWindow: 2000, // High limit for 1000+ events
-      requests: [], // Array to track request timestamps
-      lastWarning: 0
-    };
-  }
-  
-  // Add current request to tracking
-  callTicketmasterAPI.rateLimits.requests.push(Date.now());
-  
-  // Remove requests older than the window
-  const windowStart = Date.now() - callTicketmasterAPI.rateLimits.window;
-  callTicketmasterAPI.rateLimits.requests = callTicketmasterAPI.rateLimits.requests.filter(
-    timestamp => timestamp >= windowStart
-  );
-  
-  // Check if we're approaching rate limits
-  const requestCount = callTicketmasterAPI.rateLimits.requests.length;
-  const limitPercentage = requestCount / callTicketmasterAPI.rateLimits.maxPerWindow;
-  
-  if (limitPercentage > 0.8 && Date.now() - callTicketmasterAPI.rateLimits.lastWarning > 30000) {
-    console.warn(`API rate limit threshold approaching: ${requestCount}/${callTicketmasterAPI.rateLimits.maxPerWindow} requests (${Math.round(limitPercentage * 100)}%)`);
-    callTicketmasterAPI.rateLimits.lastWarning = Date.now();
-  }
-  
-  // Dynamic delay removed — page pool handles concurrency naturally
   
   // Browser-based request function (bypasses TLS fingerprinting) — LEGACY, kept as fallback
   const makeBrowserRequest = async (url, headers, proxy, cookies) => {
     try {
-      // Add minimal delay for natural behavior
-      await delay(50 + Math.random() * 100);
       
       // Filter headers for browser fetch compatibility
       const browserHeaders = {};
@@ -998,8 +868,6 @@ async function callTicketmasterAPI(facetHeader, proxyAgent, eventId, event, mapH
   // Simple request function without retries (fallback using got)
   const makeGotRequest = async (url, headers, agent) => {
     try {
-      // Add minimal delay for natural behavior
-      await delay(10 + Math.random() * 40);
       
       // Construct a safe copy of headers without any possible circular references
       const safeHeaders = {};
@@ -1150,9 +1018,7 @@ async function callTicketmasterAPI(facetHeader, proxyAgent, eventId, event, mapH
       throw new Error(`Event scraping failed - ${failedApis.join(' and ')} call(s) failed. Both APIs are required for data consistency.`);
     }
     
-    console.log(`Both APIs successful for event ${eventId} - proceeding with data processing`);
-
-    console.log(`API requests completed for event ${eventId} in ${Date.now() - startTime}ms`);
+    // Both APIs successful — proceed with data processing
 
     // Handle the case where we have partial data
     try {
@@ -1188,10 +1054,7 @@ async function callTicketmasterAPI(facetHeader, proxyAgent, eventId, event, mapH
         throw delayError;
       }
       
-      console.log(
-        `Event ${eventId} scrape successful - ${seatCount} seat groups found ` +
-        `(validation: ${validation.reason}, fluctuation: ${validation.fluctuationPercent || 0}%)`
-      );
+      // Success is the normal case — only log anomalies
       
       return result;
     } catch (processError) {
@@ -1364,84 +1227,6 @@ function getRandomBrowserVersion(browserName) {
   
   const versions = browserVersions[browserName] || browserVersions['Chrome'];
   return versions[Math.floor(Math.random() * versions.length)];
-}
-
-// Enhanced human behavior simulation
-const simulateEnhancedHumanBehavior = async (page) => {
-  try {
-    // Random delays between actions
-    const delayOptions = [100, 200, 300, 400, 500];
-    const randomDelay = () => delayOptions[Math.floor(Math.random() * delayOptions.length)];
-    
-    // Random mouse movements with error handling
-    try {
-      const viewportSize = page.viewportSize();
-      if (viewportSize) {
-        const steps = 3 + Math.floor(Math.random() * 3);
-        for (let i = 0; i < steps; i++) {
-          try {
-            await page.mouse.move(
-              Math.floor(Math.random() * viewportSize.width),
-              Math.floor(Math.random() * viewportSize.height),
-              { steps: 4 + Math.floor(Math.random() * 3) }
-            );
-            await page.waitForTimeout(randomDelay());
-          } catch (moveError) {
-            console.warn("Mouse movement error, continuing:", moveError.message);
-            continue;
-          }
-        }
-      }
-    } catch (error) {
-      console.warn("Viewport error in human behavior, continuing:", error.message);
-    }
-    
-    // Random scrolling with error handling
-    try {
-      const scrollAmount = Math.floor(Math.random() * 500) + 200;
-      const scrollSteps = 3 + Math.floor(Math.random() * 2);
-      const stepSize = scrollAmount / scrollSteps;
-      
-      for (let i = 0; i < scrollSteps; i++) {
-        try {
-          await page.mouse.wheel(0, stepSize);
-          await page.waitForTimeout(randomDelay());
-        } catch (scrollError) {
-          console.warn("Scroll error, continuing:", scrollError.message);
-          continue;
-        }
-      }
-    } catch (error) {
-      console.warn("Scrolling error in human behavior, continuing:", error.message);
-    }
-    
-    // Random keyboard activity with error handling
-    if (Math.random() > 0.6) {
-      try {
-        await page.keyboard.press('Tab');
-        await page.waitForTimeout(randomDelay());
-      } catch (keyboardError) {
-        console.warn("Keyboard error, continuing:", keyboardError.message);
-      }
-    }
-    
-    // Random viewport resizing with error handling
-    if (Math.random() > 0.7) {
-      try {
-        const viewportSize = page.viewportSize();
-        if (viewportSize) {
-          const newWidth = Math.max(800, viewportSize.width + Math.floor(Math.random() * 100) - 50);
-          const newHeight = Math.max(600, viewportSize.height + Math.floor(Math.random() * 100) - 50);
-          await page.setViewportSize({ width: newWidth, height: newHeight });
-          await page.waitForTimeout(randomDelay());
-        }
-      } catch (resizeError) {
-        console.warn("Viewport resize error, continuing:", resizeError.message);
-      }
-    }
-  } catch (error) {
-    console.warn('Error in human behavior simulation, continuing:', error.message);
-  }
 }
 
 // Enhanced request headers with improved anti-detection
