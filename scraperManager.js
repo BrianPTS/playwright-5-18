@@ -14,6 +14,7 @@ import config from './config/scraperConfig.js';
 import _ from 'lodash';
 import InventoryApi from './utils/inventoryApi.js';
 import { cleanup as cleanupBrowsers, browserPagePool } from './browser-cookies.js';
+import redisLiveStore from './helpers/RedisLiveStore.js';
 // CSV upload functionality removed
 let inventoryIdCounter = 0;
 
@@ -220,12 +221,11 @@ export class ScraperManager {
 
   async logError(eventId, errorType, error, metadata = {}) {
     try {
-      const event = await Event.findOne({ Event_ID: eventId })
-        .select("url _id Last_Updated")
-        .lean();
+      // Read from Redis (sub-ms) instead of MongoDB
+      const event = await redisLiveStore.getEventById(eventId);
 
       // Fix for missing eventUrl - provide a fallback
-      const eventUrl = event?.url || `unknown-url-for-event-${eventId}`;
+      const eventUrl = event?.url || event?.URL || `unknown-url-for-event-${eventId}`;
       const eventObjectId = event?._id || null;
 
       // Log to console first in case DB logging fails
@@ -321,9 +321,9 @@ export class ScraperManager {
       // Pre-initialize browser page pool so the first batch doesn't burn 20-30s
       try {
         const proxy = global.proxyManager ? global.proxyManager.getProxyForEvent('pre-init') : null;
-        // Grab one event ID so the seed page visits a real event URL for full cookies
-        const sampleEvent = await Event.findOne({ Skip_Scraping: { $ne: true } }).select('Event_ID').lean();
-        const seedEventId = sampleEvent?.Event_ID || null;
+        // Grab one event ID from Redis so the seed page visits a real event URL
+        const randomIds = await redisLiveStore.getRandomActiveEventIds(1);
+        const seedEventId = randomIds?.[0] || null;
         this.logWithTime(`Pre-initializing browser page pool (proxy: ${proxy?.proxy || 'none'}, seed: ${seedEventId || 'homepage'})`, 'info');
         await browserPagePool.init(proxy, null, seedEventId);
         this.logWithTime('Browser page pool pre-initialized successfully', 'success');
@@ -400,18 +400,13 @@ export class ScraperManager {
       // ALWAYS use random event IDs for cookie refresh, never the original eventId
       let eventToUse;
 
-      // Use a cached pool of random event IDs to avoid DB aggregate on every call
+      // Use a cached pool of random event IDs — refreshed from Redis every 60s
       if (!this._randomEventPool || this._randomEventPool.length === 0 || 
           !this._randomEventPoolTime || Date.now() - this._randomEventPoolTime > 60000) {
-        // Refresh pool every 60 seconds or when empty
         try {
-          const poolEvents = await Event.aggregate([
-            { $match: { Skip_Scraping: { $ne: true }, url: { $exists: true, $ne: "" } } },
-            { $sample: { size: 50 } },
-            { $project: { Event_ID: 1 } },
-          ]);
-          if (poolEvents && poolEvents.length > 0) {
-            this._randomEventPool = poolEvents.map(e => e.Event_ID);
+          const poolIds = await redisLiveStore.getRandomActiveEventIds(50);
+          if (poolIds && poolIds.length > 0) {
+            this._randomEventPool = poolIds;
             this._randomEventPoolTime = Date.now();
           }
         } catch (poolError) {
@@ -425,202 +420,29 @@ export class ScraperManager {
         eventToUse = this._randomEventPool[idx];
       }
 
-      // Fallback if pool is empty
+      // Fallback: get from Redis directly
       if (!eventToUse) {
-      // Try multiple ways to get random event IDs to ensure we always get one
-      try {
-        // First attempt: Get multiple random active events from the database
-        const randomEvents = await Event.aggregate([
-          {
-            $match: {
-              Skip_Scraping: { $ne: true },
-              url: { $exists: true, $ne: "" },
-            },
-          },
-          { $sample: { size: 20 } },
-          { $project: { Event_ID: 1, url: 1 } },
-        ]);
-
-        if (randomEvents && randomEvents.length > 0) {
-          const randomIndex = Math.floor(Math.random() * randomEvents.length);
-          const selectedEvent = randomEvents[randomIndex];
-          eventToUse = selectedEvent.Event_ID;
-
-          if (LOG_LEVEL >= 1) {
-            // Increased to level 1 for visibility
-            this.logWithTime(
-              `Using random event ${eventToUse} for cookie refresh (original event: ${eventId})`,
-              "info" // Changed from "debug" to "info"
-            );
+        try {
+          const fallbackIds = await redisLiveStore.getRandomActiveEventIds(5, eventId);
+          if (fallbackIds && fallbackIds.length > 0) {
+            eventToUse = fallbackIds[Math.floor(Math.random() * fallbackIds.length)];
           }
-        } else {
-          // Second attempt: Try to get any random event ID from other data sources
-          try {
-            // Try to find any event from the failedEvents set
-            if (this.failedEvents.size > 0) {
-              const failedEventsArray = Array.from(this.failedEvents);
-              const randomFailedEvent =
-                failedEventsArray[
-                  Math.floor(Math.random() * failedEventsArray.length)
-                ];
-
-              // Make sure it's different from the original event ID
-              if (randomFailedEvent && randomFailedEvent !== eventId) {
-                eventToUse = randomFailedEvent;
-                this.logWithTime(
-                  `Using random failed event ${eventToUse} for cookie refresh`,
-                  "info"
-                );
-              }
-            }
-
-            // If still no event, try from active jobs
-            if (!eventToUse && this.activeJobs.size > 0) {
-              const activeJobsArray = Array.from(this.activeJobs.keys());
-              const randomActiveEvent =
-                activeJobsArray[
-                  Math.floor(Math.random() * activeJobsArray.length)
-                ];
-
-              // Make sure it's different from the original event ID
-              if (randomActiveEvent && randomActiveEvent !== eventId) {
-                eventToUse = randomActiveEvent;
-                this.logWithTime(
-                  `Using random active event ${eventToUse} for cookie refresh`,
-                  "info"
-                );
-              }
-            }
-
-            // If we still don't have a random event, try to use any cached event ID
-            if (!eventToUse) {
-              if (this.headerRefreshTimestamps.size > 0) {
-                // Use a random event ID from the cache that's different from the original
-                const cachedEvents = Array.from(
-                  this.headerRefreshTimestamps.keys()
-                );
-                const filteredEvents = cachedEvents.filter(
-                  (id) => id !== eventId
-                );
-                if (filteredEvents.length > 0) {
-                  eventToUse =
-                    filteredEvents[
-                      Math.floor(Math.random() * filteredEvents.length)
-                    ];
-                  this.logWithTime(
-                    `Using cached event ID ${eventToUse} for cookie refresh after database error`,
-                    "warning"
-                  );
-                } else {
-                  // If no suitable cached event, try a random one from the database again
-                  try {
-                    const broadQuery = await Event.findOne()
-                      .sort({ Last_Updated: 1 })
-                      .limit(1)
-                      .lean();
-                    if (broadQuery) {
-                      eventToUse = broadQuery.Event_ID;
-                      this.logWithTime(
-                        `Using fallback database event ${eventToUse} for cookie refresh`,
-                        "info"
-                      );
-                    } else {
-                      eventToUse = eventId; // Last resort: use original
-                      this.logWithTime(
-                        `No alternative events found, using original event ID ${eventToUse} for cookie refresh`,
-                        "warning"
-                      );
-                    }
-                  } catch (fallbackError) {
-                    eventToUse = eventId; // Last resort: use original
-                    this.logWithTime(
-                      `Fallback database query failed, using original event ID ${eventToUse} for cookie refresh`,
-                      "warning"
-                    );
-                  }
-                }
-              } else {
-                // No cached events available, try one more database query
-                try {
-                  const anyEvent = await Event.findOne()
-                    .sort({ Last_Updated: 1 })
-                    .limit(1)
-                    .lean();
-                  if (anyEvent) {
-                    eventToUse = anyEvent.Event_ID;
-                    this.logWithTime(
-                      `Using any available event ID ${eventToUse} for cookie refresh`,
-                      "info"
-                    );
-                  } else {
-                    eventToUse = eventId; // Last resort: use original
-                    this.logWithTime(
-                      `No events found in database, using original event ID ${eventToUse} for cookie refresh`,
-                      "warning"
-                    );
-                  }
-                } catch (dbFallbackError) {
-                  eventToUse = eventId; // Last resort: use original
-                  this.logWithTime(
-                    `Final database query failed, using original event ID ${eventToUse} for cookie refresh`,
-                    "warning"
-                  );
-                }
-              }
-            }
-          } catch (fallbackError) {
-            this.logWithTime(
-              `Error finding alternative random event: ${fallbackError.message}`,
-              "warning"
-            );
-            // Try to use the original event ID as last resort
-            eventToUse = eventId;
-            this.logWithTime(
-              `Falling back to original event ID ${eventToUse} for cookie refresh`,
-              "warning"
-            );
-          }
+        } catch (err) {
+          this.logWithTime(`Error getting random event from Redis: ${err.message}`, "warning");
         }
-      } catch (dbError) {
-        this.logWithTime(
-          `Error getting random event: ${dbError.message}`,
-          "warning"
-        );
 
-        // Try to find any existing event ID in the cache
-        if (this.headerRefreshTimestamps.size > 0) {
-          const cachedEvents = Array.from(this.headerRefreshTimestamps.keys());
-          const filteredEvents = cachedEvents.filter((id) => id !== eventId);
-          if (filteredEvents.length > 0) {
-            eventToUse =
-              filteredEvents[Math.floor(Math.random() * filteredEvents.length)];
-            this.logWithTime(
-              `Using cached event ID ${eventToUse} for cookie refresh after database error`,
-              "warning"
-            );
-          } else {
-            // Last resort: use original eventId
-            eventToUse = eventId;
-            this.logWithTime(
-              `No alternative event IDs available, using original event ID ${eventToUse} for cookie refresh`,
-              "warning"
-            );
+        // Final fallback: use in-memory data or original eventId
+        if (!eventToUse) {
+          if (this.activeJobs.size > 0) {
+            const activeArr = Array.from(this.activeJobs.keys()).filter(id => id !== eventId);
+            if (activeArr.length > 0) eventToUse = activeArr[Math.floor(Math.random() * activeArr.length)];
           }
-        } else {
-          // Last resort: use original eventId
-          eventToUse = eventId;
-          this.logWithTime(
-            `No cached event IDs available, using original event ID ${eventToUse} for cookie refresh`,
-            "warning"
-          );
+          if (!eventToUse) eventToUse = eventId;
         }
       }
-      } // end fallback if pool empty
 
-      const eventDoc = await Event.findOne({ Event_ID: eventToUse })
-        .select("url")
-        .lean();
-      const refererUrl = eventDoc?.url || "https://www.ticketmaster.com/";
+      const eventDoc = await redisLiveStore.getEventById(eventToUse);
+      const refererUrl = eventDoc?.URL || eventDoc?.url || "https://www.ticketmaster.com/";
 
       // More unique request ID format with microsecond precision
       const requestId = `req-${Date.now()}-${Math.random()
@@ -947,21 +769,21 @@ export class ScraperManager {
     }
   }
 
-  async updateEventMetadata(eventId, scrapeResult) {
-    const startTime = performance.now();
-    const session = await Event.startSession();
-// save json here as well for scrapeResults 
-// const scrapeResultJson = JSON.stringify(scrapeResult);
-// fs.writeFileSync('debug/scrapeResult.json', scrapeResultJson);
-    try {
-      return await session.withTransaction(async () => {
-        // Get event data upfront - always fresh, no caching
-        const event = await Event.findOne({ Event_ID: eventId })
-          .select(
-            "priceIncreasePercentage inHandDate mapping_id Available_Seats metadata Event_Name Venue Event_DateTime"
-          ) // Added Event_Name, Venue, Event_DateTime
-          .session(session)
-          .read('primary'); // Force read from primary for fresh data
+async updateEventMetadata(eventId, scrapeResult) {
+  const startTime = performance.now();
+  const session = await Event.startSession();
+  // save json here as well for scrapeResults 
+  // const scrapeResultJson = JSON.stringify(scrapeResult);
+  // fs.writeFileSync('debug/scrapeResult.json', scrapeResultJson);
+  try {
+    return await session.withTransaction(async () => {
+      // Get event data upfront - always fresh, no caching
+      const event = await Event.findOne({ Event_ID: eventId })
+        .select(
+          "priceIncreasePercentage inHandDate mapping_id Available_Seats metadata Event_Name Venue Event_DateTime"
+        ) // Added Event_Name, Venue, Event_DateTime
+        .session(session)
+        .read('primary'); // Force read from primary for fresh data
 
       if (!event) {
         throw new Error(`Event ${eventId} not found in database`);
@@ -1591,6 +1413,12 @@ export class ScraperManager {
         if (totalOps > 0 || elapsed > 5000) {
           console.log(`[DONE ${eventId}] ${elapsed}ms - ${totalOps > 0 ? `${totalOps} ops` : 'slow'}`);
         }
+
+        // After transaction commits, sync event data + seats to Redis so all instances see it
+        if (totalOps > 0) {
+          redisLiveStore.syncEventAfterTransaction(eventId).catch(() => {});
+          redisLiveStore.refreshSeats(eventId).catch(() => {});
+        }
         });
     } catch (error) {
       await this.logError(eventId, "DATABASE_ERROR", error);
@@ -1608,25 +1436,15 @@ export class ScraperManager {
    */
   async getRandomEventId(originalEventId) {
     try {
-      // Try to get random events from database
-      const randomEvents = await Event.aggregate([
-        {
-          $match: {
-            Skip_Scraping: { $ne: true },
-            url: { $exists: true, $ne: "" },
-            Event_ID: { $ne: originalEventId }, // Explicitly exclude the original event ID
-          },
-        },
-        { $sample: { size: 3 } },
-        { $project: { Event_ID: 1 } },
-      ]);
+      // Use Redis SRANDMEMBER instead of MongoDB $sample aggregation (~0.1ms vs ~15ms)
+      const randomIds = await redisLiveStore.getRandomActiveEventIds(3, originalEventId);
 
-      if (randomEvents && randomEvents.length > 0) {
-        const randomIndex = Math.floor(Math.random() * randomEvents.length);
-        return randomEvents[randomIndex].Event_ID;
+      if (randomIds && randomIds.length > 0) {
+        const randomIndex = Math.floor(Math.random() * randomIds.length);
+        return randomIds[randomIndex];
       }
 
-      // Fallback options if database query fails
+      // Fallback options if Redis query fails
       if (this.failedEvents.size > 0) {
         const failedEventsArray = Array.from(this.failedEvents);
         const filtered = failedEventsArray.filter(
@@ -1645,9 +1463,8 @@ export class ScraperManager {
         }
       }
 
-      // Last resort: use a previously successful event ID from the cache or retry database query
+      // Last resort: use a previously successful event ID from the cache
       if (this.headerRefreshTimestamps.size > 0) {
-        // Use any existing event ID that has a valid timestamp
         const cachedEvents = Array.from(this.headerRefreshTimestamps.keys());
         const validCachedEvents = cachedEvents.filter(
           (id) => id !== originalEventId
@@ -1659,22 +1476,15 @@ export class ScraperManager {
         }
       }
 
-      // If all else fails, retry the database query with broader criteria
+      // If all else fails, retry with Redis broader criteria
       try {
-        const fallbackEvents = await Event.aggregate([
-          { $match: { url: { $exists: true } } },
-          { $sample: { size: 5 } },
-          { $project: { Event_ID: 1 } },
-        ]);
-
-        if (fallbackEvents && fallbackEvents.length > 0) {
-          return fallbackEvents[
-            Math.floor(Math.random() * fallbackEvents.length)
-          ].Event_ID;
+        const fallbackIds = await redisLiveStore.getRandomActiveEventIds(5);
+        if (fallbackIds && fallbackIds.length > 0) {
+          return fallbackIds[Math.floor(Math.random() * fallbackIds.length)];
         }
       } catch (retryError) {
         this.logWithTime(
-          `Retry database query failed: ${retryError.message}`,
+          `Retry Redis query failed: ${retryError.message}`,
           "warning"
         );
       }
@@ -2004,24 +1814,9 @@ export class ScraperManager {
 
         // Create multiple fresh test sessions to prime the cache
         try {
-          // Get multiple random event IDs from the database with timeout
-          const randomEventsPromise = Event.aggregate([
-            {
-              $match: {
-                Skip_Scraping: { $ne: true },
-                url: { $exists: true, $ne: "" },
-              },
-            },
-            { $sample: { size: 5 } }, // Get 5 random events to create diversity
-            { $project: { Event_ID: 1 } },
-          ]);
-
-          const randomEvents = await Promise.race([
-            randomEventsPromise,
-            setTimeout(10000).then(() => {
-              throw new Error("Database query timed out after 10 seconds");
-            }),
-          ]);
+          // Get random event IDs from Redis (sub-ms)
+          const randomIds = await redisLiveStore.getRandomActiveEventIds(5);
+          const randomEvents = randomIds ? randomIds.map(id => ({ Event_ID: id })) : [];
 
           if (randomEvents && randomEvents.length > 0) {
             this.logWithTime(
@@ -2154,20 +1949,10 @@ export class ScraperManager {
                 "info"
               );
             } else {
-              // Try a direct database query as last resort (with timeout)
+              // Try Redis as last resort
               try {
-                const fallbackEventPromise = Event.findOne()
-                  .sort({ Last_Updated: 1 })
-                  .limit(1)
-                  .lean();
-                const fallbackEvent = await Promise.race([
-                  fallbackEventPromise,
-                  setTimeout(10000).then(() => {
-                    throw new Error(
-                      "Final database query timed out after 10 seconds"
-                    );
-                  }),
-                ]);
+                const lastResortIds = await redisLiveStore.getRandomActiveEventIds(1);
+                const fallbackEvent = lastResortIds?.[0] ? { Event_ID: lastResortIds[0] } : null;
 
                 if (fallbackEvent) {
                   await Promise.race([
@@ -2229,154 +2014,102 @@ export class ScraperManager {
     let consecutiveFailures = 0;
     let circuitBreakerOpen = false;
     let circuitBreakerOpenTime = 0;
-    const CIRCUIT_BREAKER_THRESHOLD = 15; // Higher threshold for parallel mode
-    const CIRCUIT_BREAKER_TIMEOUT = 10000; // 10 seconds before trying again
+    const CIRCUIT_BREAKER_THRESHOLD = 15;
+    const CIRCUIT_BREAKER_TIMEOUT = 10000;
 
     while (this.isRunning) {
       try {
-        // Circuit breaker logic - prevent cascading failures
+        // ── Circuit breaker ─────────────────────────────────────────────
         if (circuitBreakerOpen) {
           if (Date.now() - circuitBreakerOpenTime > CIRCUIT_BREAKER_TIMEOUT) {
             circuitBreakerOpen = false;
             consecutiveFailures = 0;
-            this.logWithTime("Circuit breaker reset - resuming processing", "success");
+            this.logWithTime("Circuit breaker reset — resuming", "success");
           } else {
             await setTimeout(2000);
             continue;
           }
         }
-
-        // Check if we should open circuit breaker
         if (consecutiveFailures >= CIRCUIT_BREAKER_THRESHOLD && !circuitBreakerOpen) {
           circuitBreakerOpen = true;
           circuitBreakerOpenTime = Date.now();
-          this.logWithTime(
-            `Circuit breaker opened due to ${consecutiveFailures} consecutive failures - pausing for ${CIRCUIT_BREAKER_TIMEOUT/1000}s`,
-            "warning"
-          );
+          this.logWithTime(`Circuit breaker opened (${consecutiveFailures} failures) — pausing ${CIRCUIT_BREAKER_TIMEOUT / 1000}s`, "warning");
           continue;
         }
 
-        // Get events that need processing
-        const eventsToProcess = await this.getEvents();
+        // ── Claim events atomically from Redis sorted-set ───────────────
+        // getEvents() calls redisLiveStore.claimEvents() which:
+        //   1. picks the N stalest events (ZRANGEBYSCORE)
+        //   2. atomically locks each via SET NX (90s TTL)
+        //   3. returns ONLY events this instance now owns
+        const claimed = await this.getEvents();
 
-        if (eventsToProcess.length > 0) {
-          // Filter out already-processing events
-          const availableEvents = eventsToProcess.filter(
-            (id) => !this.processingEvents.has(id)
-          );
-
-          if (availableEvents.length > 0) {
-            // Split into batches of BATCH_SIZE for parallel processing
-            const batchSize = config.BATCH_SIZE;
-            const batches = [];
-            for (let i = 0; i < availableEvents.length; i += batchSize) {
-              batches.push(availableEvents.slice(i, i + batchSize));
-            }
-
-            this.logWithTime(
-              `Processing ${availableEvents.length} events in ${batches.length} batches of ${batchSize} (parallel)`,
-              "info"
-            );
-
-            // Process batches - run each batch in parallel, batches sequentially
-            for (const batch of batches) {
-              if (!this.isRunning) break;
-
-              const batchResults = await Promise.allSettled(
-                batch.map(async (eventId) => {
-                  if (this.processingEvents.has(eventId)) return null;
-                  this.processingEvents.add(eventId);
-
-                  try {
-                    const processingTimeout = config.SCRAPE_TIMEOUT + 10000;
-                    const result = await Promise.race([
-                      this.scrapeEventWithNaturalBehavior(eventId),
-                      setTimeout(processingTimeout).then(() => {
-                        throw new Error(`Processing timeout after ${processingTimeout}ms`);
-                      }),
-                    ]);
-                    return { eventId, success: !!result, result };
-                  } catch (error) {
-                    return { eventId, success: false, error: error.message };
-                  } finally {
-                    this.processingEvents.delete(eventId);
-                  }
-                })
-              );
-
-              // Process results
-              for (const settledResult of batchResults) {
-                if (settledResult.status === "fulfilled" && settledResult.value) {
-                  const { eventId, success, error } = settledResult.value;
-                  if (success) {
-                    this.eventLastProcessedTime.set(eventId, Date.now());
-                    this.resetEventFailureTracking(eventId);
-                    consecutiveFailures = 0;
-                  } else {
-                    if (error) {
-                      this.logWithTime(`❌ Error processing event ${eventId}: ${error}`, "error");
-                    }
-                    await this.handleEventFailureGracefully(eventId);
-                    consecutiveFailures++;
-                  }
-                } else if (settledResult.status === "rejected") {
-                  consecutiveFailures++;
-                }
-              }
-
-              // Small stagger delay between batches
-              if (batches.indexOf(batch) < batches.length - 1) {
-                await setTimeout(100 + Math.random() * 100);
-              }
-
-              // Break if circuit breaker should open
-              if (consecutiveFailures >= CIRCUIT_BREAKER_THRESHOLD) {
-                this.logWithTime(
-                  `Too many failures (${consecutiveFailures}), opening circuit breaker`,
-                  "warning"
-                );
-                break;
-              }
-            }
-          }
-
-          // Adaptive delay between processing cycles
-          let nextCycleDelay = config.PROCESSING_INTERVAL;
-
-          if (consecutiveFailures > 3) {
-            nextCycleDelay = config.PROCESSING_INTERVAL * 2;
-            this.logWithTime(
-              `Slowing down due to ${consecutiveFailures} failures`,
-              "warning"
-            );
-          } else if (consecutiveFailures === 0) {
-            nextCycleDelay = Math.max(50, config.PROCESSING_INTERVAL * 0.5);
-          }
-
-          nextCycleDelay += Math.random() * 50;
-          await setTimeout(nextCycleDelay);
-        } else {
-          // No events to process, wait before checking again
-          await setTimeout(
-            config.PROCESSING_INTERVAL * 2 + Math.random() * 1000
-          );
+        if (!claimed.length) {
+          // Nothing to claim — all events are fresher than the SLA or locked
+          await setTimeout(config.PROCESSING_INTERVAL * 2 + Math.random() * 1000);
+          continue;
         }
 
-        // Emergency slowdown removed - multiple instances handle redundancy
-      } catch (error) {
-        this.logWithTime(
-          `Concurrent processing error: ${error.message}`,
-          "error"
-        );
-        consecutiveFailures++;
+        this.logWithTime(`Claimed ${claimed.length} events — processing`, "info");
 
-        // Exponential backoff on errors
-        const errorDelay = Math.min(
-          30000,
-          config.PROCESSING_INTERVAL *
-            Math.pow(2, Math.min(consecutiveFailures, 5))
+        // ── Process the entire batch in parallel ────────────────────────
+        const batchResults = await Promise.allSettled(
+          claimed.map(async (eventId) => {
+            let wasSuccessful = false;
+            try {
+              const processingTimeout = config.SCRAPE_TIMEOUT + 10000;
+              const result = await Promise.race([
+                this.scrapeEventWithNaturalBehavior(eventId),
+                setTimeout(processingTimeout).then(() => {
+                  throw new Error(`Processing timeout after ${processingTimeout}ms`);
+                }),
+              ]);
+              wasSuccessful = !!result;
+              return { eventId, success: wasSuccessful };
+            } catch (error) {
+              wasSuccessful = false;
+              return { eventId, success: false, error: error.message };
+            } finally {
+              // ── Release the claim — updates staleness score & drops lock ──
+              // success=true  → score set to Date.now() (freshly updated)
+              // success=false → score set to Date.now() - 60s (will be re-claimed sooner)
+              await redisLiveStore.releaseEvent(eventId, wasSuccessful).catch(() => {
+                // Best-effort: if release fails, the 90s TTL will auto-expire the lock
+              });
+            }
+          })
         );
+        // ── Tally results ───────────────────────────────────────────────
+        for (const settled of batchResults) {
+          if (settled.status === "fulfilled" && settled.value) {
+            const { eventId, success, error } = settled.value;
+            if (success) {
+              this.eventLastProcessedTime.set(eventId, Date.now());
+              this.resetEventFailureTracking(eventId);
+              consecutiveFailures = 0;
+            } else {
+              if (error) this.logWithTime(`Error processing ${eventId}: ${error}`, "error");
+              await this.handleEventFailureGracefully(eventId);
+              consecutiveFailures++;
+            }
+          } else if (settled.status === "rejected") {
+            consecutiveFailures++;
+          }
+        }
+
+        // ── Adaptive cycle delay ────────────────────────────────────────
+        let nextDelay = config.PROCESSING_INTERVAL;
+        if (consecutiveFailures > 3) {
+          nextDelay = config.PROCESSING_INTERVAL * 2;
+        } else if (consecutiveFailures === 0) {
+          nextDelay = Math.max(50, config.PROCESSING_INTERVAL * 0.5);
+        }
+        await setTimeout(nextDelay + Math.random() * 50);
+
+      } catch (error) {
+        this.logWithTime(`Concurrent processing error: ${error.message}`, "error");
+        consecutiveFailures++;
+        const errorDelay = Math.min(30000, config.PROCESSING_INTERVAL * Math.pow(2, Math.min(consecutiveFailures, 5)));
         await setTimeout(errorDelay);
       }
     }
@@ -2844,7 +2577,14 @@ export class ScraperManager {
         );
       }
 
-      // No header/cookie refresh needed — browser page pool has authentic cookies.\n      const eventWithUniqueSession = {\n        eventId: eventId,\n        headers: null,\n        sessionId: `pool-${eventId}-${Date.now()}-retry${retryCount}`,\n        proxyId: proxy?.proxy || \"default\",\n        retryCount: retryCount,\n      };
+      // No header/cookie refresh needed — browser page pool has authentic cookies.
+      const eventWithUniqueSession = {
+        eventId: eventId,
+        headers: null,
+        sessionId: `pool-${eventId}-${Date.now()}-retry${retryCount}`,
+        proxyId: proxy?.proxy || "default",
+        retryCount: retryCount,
+      };
 
       // Quick scrape with shorter timeout and unique session using throttled function
       const result = await Promise.race([
@@ -2873,18 +2613,18 @@ export class ScraperManager {
       // FIX: Always update eventUpdateTimestamps with moment object (not Date)
       this.eventUpdateTimestamps.set(eventId, moment());
 
-      // FIX: Also update Last_Updated in database to ensure getEvents() stops returning this event
+      // Write-through: update Last_Updated in MongoDB + Redis so all 200+ instances see it
       try {
-        await Event.updateOne(
-          { Event_ID: eventId },
-          { $set: { Last_Updated: new Date() } }
-        );
+        await redisLiveStore.updateEventQuick(eventId, { Last_Updated: new Date() });
       } catch (dbError) {
         this.logWithTime(
           `Error updating Last_Updated for ${eventId}: ${dbError.message}`,
           "warning"
         );
       }
+
+      // Mark as processed in Redis (visible to all 200+ instances)
+      redisLiveStore.markEventProcessed(eventId).catch(() => {});
 
       // Update processed time to prevent immediate reprocessing
       this.eventLastProcessedTime.set(eventId, Date.now());
@@ -3117,12 +2857,8 @@ export class ScraperManager {
     try {
       const beforeCount = this.eventUpdateTimestamps.size;
 
-      // Get currently active events from database
-      const activeEvents = await Event.find({
-        Skip_Scraping: { $ne: true },
-      })
-        .select("Event_ID")
-        .lean();
+      // Get currently active events from Redis (sub-ms, no MongoDB query)
+      const activeEvents = await redisLiveStore.getActiveEvents(["Event_ID"]);
 
       const activeEventIds = new Set(
         activeEvents.map((event) => event.Event_ID)
@@ -3244,12 +2980,8 @@ export class ScraperManager {
    */
   async cleanupInactiveEvents() {
     try {
-      // Get currently active events from database
-      const activeEvents = await Event.find({
-        Skip_Scraping: { $ne: true },
-      })
-        .select("Event_ID")
-        .lean();
+      // Get currently active events from Redis (sub-ms, no MongoDB query)
+      const activeEvents = await redisLiveStore.getActiveEvents(["Event_ID"]);
 
       const activeEventIds = new Set(
         activeEvents.map((event) => event.Event_ID)
@@ -3353,18 +3085,14 @@ export class ScraperManager {
       memoryUsage: process.memoryUsage(),
     };
 
-    // Get currently active events from database to filter tracking
+    // Get currently active events from Redis (sub-ms)
     let activeEventIds = new Set();
     try {
-      const activeEvents = await Event.find({
-        Skip_Scraping: { $ne: true },
-      })
-        .select("Event_ID")
-        .lean();
+      const activeEvents = await redisLiveStore.getActiveEvents(["Event_ID"]);
 
       activeEventIds = new Set(activeEvents.map((event) => event.Event_ID));
     } catch (error) {
-      // Fallback: if database query fails, use all tracked events
+      // Fallback: use all tracked events
       console.warn(
         `Failed to get active events for performance stats: ${error.message}`
       );
@@ -3407,6 +3135,7 @@ export class ScraperManager {
     let monitoringCycleCount = 0;
 
     setInterval(async () => {
+      try {
       monitoringCycleCount++;
 
       // Run cleanup every 4 cycles (2 minutes)
@@ -3460,6 +3189,9 @@ export class ScraperManager {
           canMeet3Min ? "success" : "warning"
         );
       }
+      } catch (err) {
+        // Prevent unhandled rejection from setInterval async callback
+      }
     }, 30000);
   }
 
@@ -3477,16 +3209,11 @@ export class ScraperManager {
    */
   async _markEventCompleted(eventId) {
     try {
-      await Event.updateOne(
-        { _id: eventId },
-        {
-          $set: {
-            lastUpdated: new Date(),
-            processingStatus: "completed",
-          },
-          $unset: { needsUpdate: "" },
-        }
-      );
+      // Update Redis immediately, batch MongoDB write
+      await redisLiveStore.updateEvent(eventId, {
+        lastUpdated: new Date(),
+        processingStatus: "completed",
+      });
       this.processingLocks.delete(eventId);
     } catch (error) {
       this.logWithTime(
@@ -3537,13 +3264,18 @@ export class ScraperManager {
   }
 
   async getEventsNeedingUpdate() {
-    return Event.find({
-      $or: [
-        { lastUpdated: { $lt: new Date(Date.now() - MAX_UPDATE_INTERVAL) } },
-        { needsUpdate: { $exists: true } },
-      ],
-      processingStatus: { $ne: "completed" },
-    }).limit(100);
+    try {
+      // Use Redis for active events instead of MongoDB query
+      const events = await redisLiveStore.getActiveEvents(["Event_ID", "Last_Updated"]);
+      const now = Date.now();
+      return events.filter(e => {
+        const lastUpdated = e.Last_Updated ? new Date(e.Last_Updated).getTime() : 0;
+        return (now - lastUpdated) > MAX_UPDATE_INTERVAL;
+      }).slice(0, 100);
+    } catch (error) {
+      console.warn(`Failed to get events needing update: ${error.message}`);
+      return [];
+    }
   }
 
   /**
@@ -3614,17 +3346,11 @@ export class ScraperManager {
         return false; // Don't stop yet - continue retrying
       }
 
-      // Update event in database to stop scraping
-      await Event.updateOne(
-        { Event_ID: eventId },
-        {
-          $set: {
-            Skip_Scraping: true,
-            skip_timestamp: new Date(),
-            time_since_update: timeSinceUpdate,
-          },
-        }
-      );
+      // Update event via Redis write-through (MongoDB + Redis + active set)
+      await redisLiveStore.setSkipScraping(eventId, true, {
+        skip_timestamp: new Date(),
+        time_since_update: timeSinceUpdate,
+      });
 
       this.logWithTime(
         `🚫 STOPPED event ${eventId}: Skip_Scraping = true (Reason: ${reason}, Retries: ${retryCount}/${retryLimit}, Time since update: ${Math.floor(
@@ -3662,118 +3388,43 @@ export class ScraperManager {
   }
 
   /**
-   * Get events to process in priority order with intelligent failure handling
-   * @returns {Promise<string[]>} Array of event IDs to process
+   * Get events to process — uses Redis distributed claim system.
+   *
+   * Instead of every instance reading ALL events and computing priorities,
+   * each instance atomically claims the N stalest events from a sorted set.
+   * Zero duplicate work, guaranteed 2-minute SLA, O(1) per claim.
+   *
+   * @returns {Promise<string[]>} Event IDs this instance should process
    */
   async getEvents() {
     try {
-      const now = moment();
+      // How many events can this instance handle per cycle?
+      // Each scrape takes ~5-15s, batch of 5 in parallel ≈ one cycle
+      const claimCount = config.BATCH_SIZE || 5;
 
-      // Find ALL active events - $ne: true covers false, null, and missing fields
-      const events = await Event.find({
-        Skip_Scraping: { $ne: true },
-      })
-        .select("Event_ID Last_Updated")
-        .lean();
+      // Atomically claim the stalest events (no other instance can get these)
+      const claimed = await redisLiveStore.claimEvents(claimCount);
 
-      if (!events.length) {
-        return [];
-      }
+      if (!claimed.length) return [];
 
-      // Get current time
-      const currentTime = now.valueOf();
-
-      // Process up to 100 events normally
-      let maxEventsToProcess = 100;
-
-      // Calculate priority for each event and filter those needing updates
-      const eventsNeedingUpdate = [];
-
-      for (const event of events) {
-        const eventId = event.Event_ID;
-
-        // CRITICAL FIX: First check if this event was recently processed in memory
-        // This prevents returning events that have been processed but DB hasn't been updated yet
-        const lastProcessedTime = this.eventLastProcessedTime.get(eventId);
-        if (lastProcessedTime && Date.now() - lastProcessedTime < 120000) {
-          // Skip events processed in the last 30 seconds regardless of database state
-          continue;
+      // Filter out events in local cooldown/backoff (shouldn't happen often with distributed claims)
+      const filtered = claimed.filter(eventId => {
+        // Skip if in local cooldown
+        if (this.cooldownEvents.has(eventId)) {
+          const cooldownUntil = this.cooldownEvents.get(eventId);
+          if (moment().isBefore(cooldownUntil)) {
+            // Release the claim so another instance can take it
+            redisLiveStore.releaseEvent(eventId, false).catch(() => {});
+            return false;
+          }
+          this.cooldownEvents.delete(eventId);
         }
+        return true;
+      });
 
-        // Also check processing lock to avoid duplicate processing
-        if (this.processingEvents.has(eventId)) {
-          continue;
-        }
-
-        // INTELLIGENT FAILURE HANDLING: Apply exponential backoff for failed events
-        const failureCount = this.eventFailureCount.get(eventId) || 0;
-        const lastFailureTime = this.eventLastFailureTime.get(eventId) || 0;
-        const timeSinceLastFailure = Date.now() - lastFailureTime;
-
-        // Apply exponential backoff for failed events
-        if (failureCount > 0 && timeSinceLastFailure < failureCount * 60000) {
-          continue; // Skip events in backoff period
-        }
-
-        const lastUpdated = event.Last_Updated
-          ? moment(event.Last_Updated).valueOf()
-          : 0;
-        const timeSinceLastUpdate = currentTime - lastUpdated;
-
-        // Skip if updated too recently (unless critical)
-        if (timeSinceLastUpdate < 30000 && lastUpdated > 0) {
-          continue; // Skip events updated in last 30 seconds
-        }
-
-        // Calculate priority score
-        let priorityScore = timeSinceLastUpdate / 1000;
-
-        // Critical events approaching 3-minute threshold
-        if (timeSinceLastUpdate > 150000) {
-          // 2.5 minutes
-          priorityScore = priorityScore * 1000;
-        }
-        // Very urgent - approaching 2 minutes
-        else if (timeSinceLastUpdate > 110000) {
-          priorityScore = priorityScore * 500;
-        }
-        // Urgent - over 1.5 minutes
-        else if (timeSinceLastUpdate > 90000) {
-          priorityScore = priorityScore * 100;
-        }
-        // High - over 1 minute
-        else if (timeSinceLastUpdate > 60000) {
-          priorityScore = priorityScore * 50;
-        }
-        // Medium - over 45 seconds
-        else if (timeSinceLastUpdate > 45000) {
-          priorityScore = priorityScore * 10;
-        }
-
-        eventsNeedingUpdate.push({
-          eventId: event.Event_ID,
-          priorityScore,
-          timeSinceLastUpdate,
-          isCritical: timeSinceLastUpdate > 150000,
-        });
-
-        // Cache the priority score
-        this.eventPriorityScores.set(event.Event_ID, priorityScore);
-      }
-
-      // Sort by priority (highest first)
-      eventsNeedingUpdate.sort((a, b) => b.priorityScore - a.priorityScore);
-
-      // Return events that need updating, limited to maxEventsToProcess
-      const eventsToReturn = eventsNeedingUpdate.map((event) => event.eventId);
-
-      if (eventsToReturn.length > maxEventsToProcess) {
-        return eventsToReturn.slice(0, maxEventsToProcess);
-      }
-
-      return eventsToReturn;
+      return filtered;
     } catch (error) {
-      console.error("Error getting events to process:", error);
+      console.error("Error claiming events:", error.message);
       return [];
     }
   }

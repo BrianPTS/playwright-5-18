@@ -18,6 +18,10 @@ import setupGlobals from "./setup.js";
 import scraperManager from "./scraperManager.js"; // Added for command-line start and graceful shutdown
 import { cleanup as cleanupBrowsers, cleanupApiBrowser } from "./browser-cookies.js";
 
+// Redis imports
+import { connectRedis, closeRedis } from "./config/redis.js";
+import redisLiveStore from "./helpers/RedisLiveStore.js";
+
 dotenv.config();
 
 // Initialize global components (including ProxyManager)
@@ -56,8 +60,34 @@ app.use(morgan("dev"));
 // Import database configuration
 import connectDB, { closeConnections } from "./config/db.js";
 
-// Database connection
-connectDB();
+// Database + Redis initialization → then start server
+(async () => {
+  try {
+    // 1. MongoDB first (RedisLiveStore hydration reads from MongoDB)
+    await connectDB();
+
+    // 2. Redis connection
+    await connectRedis();
+    console.log("Redis connected successfully.");
+
+    // 3. Hydrate Redis from MongoDB (distributed-lock-protected, runs once across all instances)
+    await redisLiveStore.hydrate();
+    console.log("Redis live store hydrated.");
+
+    // 4. Start the write batcher (flushes Redis writes → MongoDB every 5s)
+    redisLiveStore.startWriteBatcher();
+
+    // 5. Instance heartbeat every 30s so other instances know we're alive
+    setInterval(() => redisLiveStore.heartbeat().catch(() => {}), 30000);
+    redisLiveStore.heartbeat().catch(() => {}); // immediate first beat
+
+    // 6. NOW start the HTTP server (Redis is ready, staleness index is built)
+    startServerWithPortFallback(initialPort);
+  } catch (err) {
+    console.error("Startup initialization failed:", err);
+    process.exit(1);
+  }
+})();
 
 // Routes
 app.use("/api/health", healthRoutes);
@@ -121,9 +151,6 @@ function startServerWithPortFallback(currentPort, attempt = 0, maxAttempts = 20)
   });
 }
 
-// Start server
-startServerWithPortFallback(initialPort);
-
 // Graceful shutdown handler - shared between SIGTERM and SIGINT
 let isShuttingDown = false;
 
@@ -167,7 +194,18 @@ async function gracefulShutdown(signal) {
     }
   }
 
-  // 3. Close HTTP server
+  // 3. Flush pending Redis writes to MongoDB & close Redis
+  try {
+    console.log("Flushing Redis write buffer to MongoDB...");
+    await redisLiveStore.stopWriteBatcher();
+    console.log("Write buffer flushed. Closing Redis...");
+    await closeRedis();
+    console.log("Redis closed successfully.");
+  } catch (error) {
+    console.error("Error during Redis shutdown:", error.message);
+  }
+
+  // 4. Close HTTP server
   const closeDbAndExit = async (serverError) => {
     console.log("Closing database connections...");
     try {

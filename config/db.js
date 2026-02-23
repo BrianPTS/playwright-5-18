@@ -17,9 +17,10 @@ const connectDB = async () => {
       serverSelectionTimeoutMS: 30000,
       // Add socket timeout to prevent hanging connections
       socketTimeoutMS: 45000,
-      // Connection pool settings for better reliability
-      maxPoolSize: 10,
-      minPoolSize: 2,
+      // Connection pool settings — reduced for 200+ PM2 instances (200 × 3 = 600 max connections)
+      // Most reads now go through Redis; MongoDB is for transactions & writes only
+      maxPoolSize: 3,
+      minPoolSize: 1,
       // Heartbeat frequency
       heartbeatFrequencyMS: 10000
     });

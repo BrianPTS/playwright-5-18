@@ -1,67 +1,44 @@
 import { Event, ConsecutiveGroup, ErrorLog } from "../models/index.js";
 import scraperManager from "../scraperManager.js";
-import fs from 'fs';
-import path from 'path';
+import redisLiveStore from "../helpers/RedisLiveStore.js";
 
 // Initialize scraper manager
 
 export const getAllEvents = async (req, res) => {
   try {
-    const events = await Event.find().sort({ Last_Updated: -1 });
+    // Read from Redis (sub-ms) — falls back to MongoDB internally
+    const events = await redisLiveStore.getAllEvents();
 
-    // Add active status to each event
-    const eventsWithStatus = events.map((event) => ({
-      ...event.toObject(),
-      isActive: scraperManager.activeJobs.has(event.Event_ID),
-    }));
+    // Sort by Last_Updated desc & add active status
+    const eventsWithStatus = events
+      .sort((a, b) => new Date(b.Last_Updated || 0) - new Date(a.Last_Updated || 0))
+      .map((event) => ({
+        ...event,
+        isActive: scraperManager.activeJobs.has(event.Event_ID),
+      }));
 
-    res.json({
-      status: "success",
-      data: eventsWithStatus,
-    });
+    res.json({ status: "success", data: eventsWithStatus });
   } catch (error) {
-    res.status(500).json({
-      status: "error",
-      message: error.message,
-    });
+    res.status(500).json({ status: "error", message: error.message });
   }
 };
 
 export const getEventById = async (req, res) => {
   try {
-    const event = await Event.findOne({ 
-      $or: [
-        { Event_ID: req.params.eventId },
-        { mapping_id: req.params.eventId }
-      ]
-    });
+    // Try Redis first (by Event_ID or mapping_id)
+    const event = await redisLiveStore.findEventByIdOrMapping(req.params.eventId);
     if (!event) {
-      return res.status(404).json({
-        status: "error",
-        message: "Event not found",
-      });
+      return res.status(404).json({ status: "error", message: "Event not found" });
     }
 
-    const seatGroups = await ConsecutiveGroup.find({
-      eventId: event.Event_ID,
-    });
-
+    // Seat groups from Redis
+    const seatGroups = await redisLiveStore.getSeatGroups(event.Event_ID);
     const isActive = scraperManager.activeJobs.has(event.Event_ID);
 
-    res.json({
-      status: "success",
-      data: {
-        ...event.toObject(),
-        isActive,
-        seatGroups,
-      },
-    });
+    res.json({ status: "success", data: { ...event, isActive, seatGroups } });
   } catch (error) {
     console.error("Error:", error);
-    res.status(500).json({
-      status: "error",
-      message: error.message,
-    });
+    res.status(500).json({ status: "error", message: error.message });
   }
 };
 
@@ -127,6 +104,9 @@ export const createEvent = async (req, res) => {
 
     await event.save();
 
+    // Sync to Redis live store so all instances see the new event immediately
+    await redisLiveStore.createEvent(event.toObject());
+
     res.status(201).json({
       status: "success",
       data: event,
@@ -144,7 +124,7 @@ export const startEventScraping = async (req, res) => {
   try {
     const { eventId } = req.params;
 
-    // Find and update the event
+    // Update MongoDB
     const event = await Event.findOneAndUpdate(
       { Event_ID: eventId },
       { Skip_Scraping: false },
@@ -152,33 +132,20 @@ export const startEventScraping = async (req, res) => {
     );
 
     if (!event) {
-      return res.status(404).json({
-        status: "error",
-        message: "Event not found",
-      });
+      return res.status(404).json({ status: "error", message: "Event not found" });
     }
 
-    // Check if the event is already being scraped
+    // Sync to Redis — adds to active set + staleness index
+    await redisLiveStore.setSkipScraping(eventId, false);
+
     if (scraperManager.activeJobs.has(eventId)) {
-      return res.status(400).json({
-        status: "error",
-        message: "Scraping is already running for this event",
-      });
+      return res.status(400).json({ status: "error", message: "Scraping is already running for this event" });
     }
 
-    // Start scraping for this specific event
     await scraperManager.scrapeEvent(eventId);
-
-    res.json({
-      status: "success",
-      message: `Scraping started for event ${eventId}`,
-      data: event,
-    });
+    res.json({ status: "success", message: `Scraping started for event ${eventId}`, data: event });
   } catch (error) {
-    res.status(500).json({
-      status: "error",
-      message: error.message,
-    });
+    res.status(500).json({ status: "error", message: error.message });
   }
 };
 
@@ -186,42 +153,34 @@ export const stopEventScraping = async (req, res) => {
   try {
     const { eventId } = req.params;
 
-    // Find the event by either Event_ID or mapping_id
-    const event = await Event.findOne({
-      $or: [
-        { Event_ID: eventId },
-        { mapping_id: eventId }
-      ]
-    });
-
+    // Find by Event_ID or mapping_id via Redis first
+    let event = await redisLiveStore.findEventByIdOrMapping(eventId);
     if (!event) {
-      return res.status(404).json({
-        status: "error",
-        message: "Event not found",
-      });
+      return res.status(404).json({ status: "error", message: "Event not found" });
     }
 
-    // Update the event to skip scraping
+    const realEventId = event.Event_ID;
+
+    // Update MongoDB
     const updatedEvent = await Event.findOneAndUpdate(
-      { _id: event._id },
+      { Event_ID: realEventId },
       { Skip_Scraping: true },
       { new: true }
     );
 
-    // Clean up all tracking data for this event
-    scraperManager.cleanupEventTracking(event.Event_ID);
+    // Sync to Redis — removes from active set + staleness index
+    await redisLiveStore.setSkipScraping(realEventId, true);
+
+    scraperManager.cleanupEventTracking(realEventId);
 
     res.json({
       status: "success",
-      message: `Scraping stopped for event ${event.Event_ID}`,
+      message: `Scraping stopped for event ${realEventId}`,
       data: updatedEvent,
     });
   } catch (error) {
     console.error("Error stopping event scraping:", error);
-    res.status(500).json({
-      status: "error",
-      message: error.message,
-    });
+    res.status(500).json({ status: "error", message: error.message });
   }
 };
 
@@ -229,224 +188,38 @@ export const deleteEvent = async (req, res) => {
   try {
     const { eventId } = req.params;
 
-    // Find and delete the event
     const event = await Event.findOneAndDelete({ Event_ID: eventId });
-
     if (!event) {
-      return res.status(404).json({
-        status: "error",
-        message: "Event not found",
-      });
+      return res.status(404).json({ status: "error", message: "Event not found" });
     }
 
-    // Clean up all tracking data for this event
+    // Remove from Redis (active set, staleness index, keys)
+    await redisLiveStore.deleteEvent(eventId);
     scraperManager.cleanupEventTracking(eventId);
 
-    res.json({
-      status: "success",
-      message: `Event ${eventId} deleted successfully`,
-    });
+    res.json({ status: "success", message: `Event ${eventId} deleted successfully` });
   } catch (error) {
-    res.status(500).json({
-      status: "error",
-      message: error.message,
-    });
+    res.status(500).json({ status: "error", message: error.message });
   }
 };
 
 export const handleStaleEvents = async (req, res) => {
-  res.json({
-    status: "success",
-    message: "Recovery removed - multiple instances handle redundancy",
-  });
+  try {
+    const overdue = await redisLiveStore.getOverdueEvents(120000); // 2min
+    res.json({
+      status: "success",
+      data: { overdueCount: overdue.length, events: overdue },
+    });
+  } catch (error) {
+    res.status(500).json({ status: "error", message: error.message });
+  }
 };
 
 export const getStaleEventStats = async (req, res) => {
-  res.json({
-    status: "success",
-    message: "Recovery removed - stale event stats no longer tracked",
-    data: null,
-  });
-};
-
-export const forceCsvGeneration = async (req, res) => {
   try {
-    // Import inventory controller to force CSV generation
-    const inventoryController = (await import('./inventoryController.js')).default;
-    
-    // Force CSV generation with behavior rules
-    const result = inventoryController.forceCombinedCSVGeneration();
-    
-    res.json({
-      status: "success",
-      message: "CSV generation forced with behavior rules",
-      data: result
-    });
+    const stats = await redisLiveStore.getStalenessStats();
+    res.json({ status: "success", data: stats });
   } catch (error) {
-    console.error("Error forcing CSV generation:", error);
-    res.status(500).json({
-      status: "error",
-      message: error.message,
-    });
-  }
-};
-
-export const getCsvStats = async (req, res) => {
-  try {
-    // Import inventory controller to get CSV stats
-    const { getInventoryStats } = await import('./inventoryController.js');
-    
-    // Get detailed CSV and inventory statistics
-    const stats = getInventoryStats();
-    
-    res.json({
-      status: "success",
-      data: stats
-    });
-  } catch (error) {
-    console.error("Error getting CSV stats:", error);
-    res.status(500).json({
-      status: "error",
-      message: error.message,
-    });
-  }
-};
-
-export const testSeatFormatting = async (req, res) => {
-  try {
-    const { seats } = req.body;
-    
-    if (!seats) {
-      return res.status(400).json({
-        status: "error",
-        message: "Please provide 'seats' in request body",
-      });
-    }
-    
-    // Import the validation function
-    const { validateConsecutiveSeats } = await import('../helpers/csvInventoryHelper.js');
-    
-    // Test the seat formatting
-    const result = validateConsecutiveSeats(seats);
-    
-    res.json({
-      status: "success",
-      data: {
-        input: seats,
-        result: result,
-        examples: {
-          "concatenated_example": "103104105106107",
-          "expected_output": "103,104,105,106,107",
-          "scientific_notation_issue": "Prevents seats from becoming 1.03104105106107E+14"
-        }
-      }
-    });
-  } catch (error) {
-    console.error("Error testing seat formatting:", error);
-    res.status(500).json({
-      status: "error",
-      message: error.message,
-    });
-  }
-};
-
-export const downloadEventCsv = async (req, res) => {
-  try {
-    const { eventId } = req.params;
-    
-    // Get event data with mapping_id
-    const event = await Event.findOne({ Event_ID: eventId })
-      .select('Event_Name Venue Event_DateTime mapping_id inHandDate')
-      .lean();
-      
-    if (!event) {
-      return res.status(404).json({ success: false, message: 'Event not found' });
-    }
-    
-    // Validate mapping_id
-    if (!event.mapping_id) {
-      return res.status(400).json({ success: false, message: 'No mapping_id found for this event' });
-    }
-    
-    const mapping_id = event.mapping_id;
-    
-    // Get all groups for this event
-    const groups = await ConsecutiveGroup.find({ event_id: eventId })
-      .select('section row seats inventory')
-      .lean();
-      
-    if (!groups || groups.length === 0) {
-      return res.status(404).json({ success: false, message: 'No groups found for this event' });
-    }
-    
-    // Import the inventory controller
-    const inventoryController = (await import('./inventoryController.js')).default;
-    
-    // Delete old CSV files before generating new ones
-    inventoryController.deleteOldCsvFiles(eventId);
-    
-    // Create a Set to track unique combinations
-    const uniqueKeys = new Set();
-    const uniqueGroups = [];
-    
-    // Filter out duplicates based on section, row, and seats
-    groups.forEach(group => {
-      const uniqueKey = `${group.section}-${group.row}-${group.seats.map(s => s.number).join(",")}`;
-      if (!uniqueKeys.has(uniqueKey)) {
-        uniqueKeys.add(uniqueKey);
-        uniqueGroups.push(group);
-      }
-    });
-    
-    // Format the unique groups as inventory records
-    const inventoryRecords = uniqueGroups.map(group => ({
-      inventory_id: group._id.toString(),
-      event_name: event.Event_Name || `Event ${eventId}`,
-      venue_name: event.Venue || "Unknown Venue",
-      event_date: event.Event_DateTime?.toISOString() || new Date().toISOString(),
-      event_id: mapping_id || '',
-      quantity: group.inventory.quantity,
-      section: group.section,
-      row: group.row,
-      seats: group.seats.map(s => s.number.toString()).join(","),
-      barcodes: "",
-      internal_notes: group.inventory.notes || `These are internal notes. @sec[${group.section}]`,
-      public_notes: group.inventory.publicNotes || `These are ${group.row} Row`,
-      tags: group.inventory.tags || "",
-      list_price: group.inventory.listPrice,
-      face_price: group.inventory.tickets?.[0]?.faceValue || "",
-      taxed_cost: group.inventory.tickets?.[0]?.taxedCost || "",
-      cost: group.inventory.tickets?.[0]?.cost || "",
-      hide_seats: "Y",
-      in_hand: "N",
-      in_hand_date: event.inHandDate?.toISOString() || new Date().toISOString(),
-      instant_transfer: "N",
-      files_available: "Y",
-      split_type: group.inventory.splitType || "NEVERLEAVEONE",
-      custom_split: group.inventory.customSplit || `${Math.ceil(group.inventory.quantity/2)},${group.inventory.quantity}`,
-      stock_type: group.inventory.stockType || "custom",
-      zone: "N",
-      shown_quantity: String(Math.ceil(group.inventory.quantity/2)),
-      passthrough: "",
-      mapping_id: mapping_id || ""
-    }));
-    
-    // Add the records in bulk
-    const result = await inventoryController.addBulkInventory(inventoryRecords, eventId);
-    
-    if (!result.success) {
-      throw new Error(result.message);
-    }
-    
-    // Send the file as a download
-    const filePath = path.join(process.cwd(), 'data', `event_${eventId}.csv`);
-    res.download(filePath, `event_${eventId}.csv`, (err) => {
-      if (err) {
-        res.status(500).json({ success: false, message: 'Error sending file' });
-      }
-    });
-  } catch (error) {
-    console.error(`Error downloading event CSV: ${error.message}`);
-    res.status(500).json({ success: false, message: error.message });
+    res.status(500).json({ status: "error", message: error.message });
   }
 };

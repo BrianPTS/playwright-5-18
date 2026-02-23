@@ -1,5 +1,5 @@
 import moment from "moment";
-import { Event } from "../models/index.js";
+import redisLiveStore from "./RedisLiveStore.js";
 import config from "../config/scraperConfig.js";
 
 /**
@@ -84,14 +84,10 @@ class EventScheduler {
     const nearDeadlineEvents = [];
     const regularEvents = [];
     
-    // Get all events that need updating
-    const allEvents = await Event.find({
-      Skip_Scraping: { $ne: true },
-      Event_ID: { $nin: [...processingEvents] },
-    })
-      .sort({ Last_Updated: 1 })
-      .select("Event_ID Last_Updated")
-      .lean();
+    // Get all active events from Redis (sub-ms) instead of MongoDB query
+    const allEvents = (await redisLiveStore.getActiveEvents(["Event_ID", "Last_Updated"]))
+      .filter(e => !processingEvents.has(e.Event_ID))
+      .sort((a, b) => new Date(a.Last_Updated || 0) - new Date(b.Last_Updated || 0));
     
     // Process based on deadline proximity
     for (const event of allEvents) {
