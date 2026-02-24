@@ -310,6 +310,16 @@ export class ScraperManager {
         this.cleanupFailureTracking();
       }, 600000);
 
+      // Periodic sync: detect events stopped in MongoDB by the frontend
+      // and clean them from Redis (every 30 seconds)
+      setInterval(async () => {
+        try {
+          await redisLiveStore.syncSkipScrapingFromDB();
+        } catch (err) {
+          this.logWithTime(`Skip_Scraping sync error: ${err.message}`, "warning");
+        }
+      }, 30000);
+
       // Retry queue cleanup removed
 
       // Start concurrent event processing
@@ -2383,6 +2393,17 @@ async updateEventMetadata(eventId, scrapeResult) {
     let proxy = null;
 
     try {
+      // Check if event was stopped (Skip_Scraping) before doing any work
+      const stillActive = await redisLiveStore.isEventActive(eventId);
+      if (!stillActive) {
+        this.logWithTime(
+          `Skipping event ${eventId} — stopped (Skip_Scraping=true)`,
+          "info"
+        );
+        this.cleanupEventTracking(eventId);
+        return true; // Return true so releaseEvent treats it as success (won't re-add to staleness anyway)
+      }
+
       // Check if we should skip due to recent processing
       const lastProcessed = this.eventLastProcessedTime.get(eventId);
       const minInterval = 3000 + Math.random() * 2000; // 3-5 seconds
@@ -3407,20 +3428,36 @@ async updateEventMetadata(eventId, scrapeResult) {
 
       if (!claimed.length) return [];
 
-      // Filter out events in local cooldown/backoff (shouldn't happen often with distributed claims)
-      const filtered = claimed.filter(eventId => {
-        // Skip if in local cooldown
-        if (this.cooldownEvents.has(eventId)) {
-          const cooldownUntil = this.cooldownEvents.get(eventId);
-          if (moment().isBefore(cooldownUntil)) {
-            // Release the claim so another instance can take it
-            redisLiveStore.releaseEvent(eventId, false).catch(() => {});
-            return false;
+      // Filter out events in local cooldown/backoff or stopped via Skip_Scraping
+      const activeChecks = await Promise.all(
+        claimed.map(async (eventId) => {
+          // Check if event was stopped in DB/Redis
+          const isActive = await redisLiveStore.isEventActive(eventId);
+          if (!isActive) {
+            this.logWithTime(
+              `Releasing stopped event ${eventId} — Skip_Scraping=true`,
+              "info"
+            );
+            // Release lock but don't re-add to staleness (releaseEvent already handles this)
+            redisLiveStore.releaseEvent(eventId, true).catch(() => {});
+            this.cleanupEventTracking(eventId);
+            return null;
           }
-          this.cooldownEvents.delete(eventId);
-        }
-        return true;
-      });
+          // Skip if in local cooldown
+          if (this.cooldownEvents.has(eventId)) {
+            const cooldownUntil = this.cooldownEvents.get(eventId);
+            if (moment().isBefore(cooldownUntil)) {
+              // Release the claim so another instance can take it
+              redisLiveStore.releaseEvent(eventId, false).catch(() => {});
+              return null;
+            }
+            this.cooldownEvents.delete(eventId);
+          }
+          return eventId;
+        })
+      );
+
+      const filtered = activeChecks.filter(Boolean);
 
       return filtered;
     } catch (error) {

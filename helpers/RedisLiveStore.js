@@ -491,6 +491,78 @@ class RedisLiveStore {
   }
 
   /**
+   * Check if an event is still active (not stopped/skipped).
+   *
+   * Always checks MongoDB as the source of truth because the frontend
+   * writes Skip_Scraping directly to the database without notifying this
+   * scraper backend or Redis.
+   *
+   * If the DB says the event is stopped, we also sync that to Redis
+   * immediately (remove from active set + staleness) so future cycles
+   * won't even claim it.
+   *
+   * @param {string} eventId
+   * @returns {Promise<boolean>}
+   */
+  async isEventActive(eventId) {
+    const ev = await Event.findOne(
+      { Event_ID: eventId },
+      { Skip_Scraping: 1 }
+    ).lean();
+
+    if (!ev) return false;
+
+    if (ev.Skip_Scraping) {
+      // Sync the stop to Redis so the event is cleaned up for all instances
+      if (this.ready) {
+        await this.redis.srem(KEY.active, eventId);
+        await this.redis.zrem(KEY.staleness, eventId);
+        await this.redis.del(KEY.lock(eventId));
+      }
+      return false;
+    }
+    return true;
+  }
+
+  /**
+   * Periodic sync: detect events stopped directly in MongoDB by the frontend
+   * and remove them from Redis active set + staleness sorted set.
+   *
+   * Should be called on a setInterval (e.g. every 30 s).
+   */
+  async syncSkipScrapingFromDB() {
+    if (!this.ready) return;
+    try {
+      // Get all event IDs currently in the Redis active set
+      const redisActiveIds = await this.redis.smembers(KEY.active);
+      if (!redisActiveIds.length) return;
+
+      // Ask MongoDB which of those are actually stopped
+      const stoppedEvents = await Event.find(
+        { Event_ID: { $in: redisActiveIds }, Skip_Scraping: true },
+        { Event_ID: 1 }
+      ).lean();
+
+      if (!stoppedEvents.length) return;
+
+      // Remove stopped events from Redis in a pipeline
+      const pipe = this.redis.pipeline();
+      for (const ev of stoppedEvents) {
+        pipe.srem(KEY.active, ev.Event_ID);
+        pipe.zrem(KEY.staleness, ev.Event_ID);
+        pipe.del(KEY.lock(ev.Event_ID));
+      }
+      await pipe.exec();
+
+      console.log(
+        `[RedisLiveStore] Synced ${stoppedEvents.length} stopped events from DB → removed from Redis`
+      );
+    } catch (err) {
+      console.error("[RedisLiveStore] syncSkipScrapingFromDB error:", err.message);
+    }
+  }
+
+  /**
    * Atomically claim the N stalest events that no other instance owns.
    *
    *   1. ZRANGEBYSCORE evt:staleness 0 (now-30s) LIMIT 0 N*3
@@ -540,19 +612,24 @@ class RedisLiveStore {
   async releaseEvent(eventId, success = true) {
     if (!this.ready) return;
     const newScore = success ? Date.now() : Date.now() - 60000;
+    // Only re-add to staleness if the event is still in the active set.
+    // This prevents stopped events from being re-inserted into the scrape queue.
     const lua = `
       local lock = redis.call('GET', KEYS[1])
       if lock == ARGV[1] then
         redis.call('DEL', KEYS[1])
       end
-      redis.call('ZADD', KEYS[2], ARGV[2], ARGV[3])
+      if redis.call('SISMEMBER', KEYS[3], ARGV[3]) == 1 then
+        redis.call('ZADD', KEYS[2], ARGV[2], ARGV[3])
+      end
       return 1
     `;
     await this.redis.eval(
       lua,
-      2,
+      3,
       KEY.lock(eventId),
       KEY.staleness,
+      KEY.active,
       INSTANCE_ID,
       newScore,
       eventId
