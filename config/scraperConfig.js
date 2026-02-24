@@ -4,7 +4,7 @@ import { cpus } from "os";
 export default {
   // Time limits - optimized for better flow
   MAX_UPDATE_INTERVAL: 120000, // Strict 2-minute update requirement
-  SCRAPE_TIMEOUT: 90000, // 90s max per event — smaller batches complete in ~25-35s
+  SCRAPE_TIMEOUT: 45000, // 45s max per event — fail fast, free resources sooner
   MIN_TIME_BETWEEN_EVENT_SCRAPES: 500, // Minimal delay - page pool handles concurrency naturally
   URGENT_THRESHOLD: 110000, // Events needing update within 10 seconds of deadline
   PROCESSING_INTERVAL: 500, // Faster processing interval (reduced to 500ms for better throughput)

@@ -764,12 +764,12 @@ export class ScraperManager {
       this.globalConsecutiveErrors = 0;
       this.lastCookieReset = now;
 
-      // Apply a system-wide cooldown to allow for fresh cookie generation
+      // Apply a brief cooldown for fresh cookie generation
       this.logWithTime(
-        "Applying 30-second cooldown to allow for cookie regeneration",
+        "Applying 5-second cooldown for cookie regeneration",
         "info"
       );
-      await setTimeout(30000);
+      await setTimeout(5000);
 
       // Trigger a headers refresh on the next event
       return true;
@@ -2138,8 +2138,8 @@ async updateEventMetadata(eventId, scrapeResult) {
       this.eventLastFailureTime.set(eventId, now);
 
       // FAST FAILURE RECOVERY - Minimal delays for scraping failures
-      const baseDelay = 500; // Start with 0.5 seconds (was 2s)
-      const maxDelay = 5000; // Max 5 seconds (was 2 minutes)
+      const baseDelay = 500; // Start with 0.5 seconds
+      const maxDelay = 3000; // Max 3 seconds — fail fast, retry fast
 
       // Minimal exponential backoff - fail fast, retry fast
       let backoffDelay = Math.min(

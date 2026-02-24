@@ -501,14 +501,12 @@ async function refreshHeaders(eventId, proxy, existingCookies = null) {
 
 
 const throttle = pThrottle({
-  limit: 50, // Increased from 50 for even higher volume
-  interval: 2000 // Keep at 1 second for good balance
+  limit: 200, // High limit for maximum throughput
+  interval: 1000 // 200 req/s
 });
 
 const throttledRequest = throttle(async (options) => {
-  // Minimal delay for maximum throughput
-  const humanDelay = Math.floor(Math.random() * 50) + 25; // Reduced delay
-  await delay(humanDelay);
+  // No artificial delay — maximize speed
   return got(options);
 });
 
@@ -781,8 +779,8 @@ const ScrapeEvent = async (
       console.warn(
         `Suspiciously fast API failure for event ${eventId} (${apiDuration}ms). Possible rate limiting detected.`
       );
-      // Implement a temporary rate limiting backoff (1 minute)
-      ScrapeEvent.rateLimits.blockedUntil = Date.now() + 60 * 1000;
+      // Implement a temporary rate limiting backoff (10 seconds)
+      ScrapeEvent.rateLimits.blockedUntil = Date.now() + 10 * 1000;
     }
 
     return result;

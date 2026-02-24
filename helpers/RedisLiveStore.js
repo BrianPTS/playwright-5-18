@@ -611,7 +611,7 @@ class RedisLiveStore {
     const toTry = candidates.slice(0, Math.min(candidates.length, count + 5));
     const pipe = this.redis.pipeline();
     for (const id of toTry) {
-      pipe.set(KEY.lock(id), INSTANCE_ID, "EX", 120, "NX"); // 120s lock (was 180s)
+      pipe.set(KEY.lock(id), INSTANCE_ID, "EX", 60, "NX"); // 60s lock — matches scrape timeout
     }
     const results = await pipe.exec();
 
