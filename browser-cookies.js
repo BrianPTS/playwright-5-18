@@ -19,8 +19,8 @@ let apiContextLock = false;
 const CONFIG = {
   COOKIE_REFRESH_INTERVAL: 45 * 60 * 1000, // 45 minutes
   PAGE_TIMEOUT: 90000, // 60 seconds for page operations
-  MAX_RETRIES: 3, // Fail fast
-  RETRY_DELAY: 3000, // 3s between retries
+  MAX_RETRIES: 5, // Reduced from 5 to fail faster
+  RETRY_DELAY: 8000, // Reduced from 10s to 8s
   CHALLENGE_TIMEOUT: 15000, // 15 seconds for challenge handling
   COOKIE_REFRESH_TIMEOUT: 2 * 60 * 1000, // 2 minutes timeout for cookie refresh
   MAX_REFRESH_RETRIES: 3, // Maximum retries for cookie refresh with new proxy/event
@@ -1300,7 +1300,7 @@ class RequestBatcher {
 // The RequestBatcher multiplexes many events onto each page.
 // ====================================================
 class BrowserPagePool {
-  constructor(size = 8) {
+  constructor(size = 3) {
     this.size = size;
     this.pages = [];
     this.available = [];
@@ -1312,13 +1312,13 @@ class BrowserPagePool {
     this._batcher = null;
     // Cookie refresh via full browser restart
     this._lastCookieRefresh = Date.now();
-    this._cookieRefreshInterval = 12 * 60 * 1000; // 12 minutes — well before expiry, less restart downtime
+    this._cookieRefreshInterval = 8 * 60 * 1000; // 8 minutes — well before 10-15m expiry
     this._isRestarting = false;
     this._refreshTimer = null;
     this._consecutiveErrors = 0;
     // Proxy rotation after N requests
     this._requestsSinceRotation = 0;
-    this._proxyRotationThreshold = 1500; // rotate proxy every 1500 event calls — fewer restarts
+    this._proxyRotationThreshold = 500; // rotate proxy every 500 event calls — avoids restart thrashing
     // Store init params for restart
     this._initProxy = null;
     this._initCookies = null;
@@ -1390,7 +1390,7 @@ class BrowserPagePool {
     const seedPage = await context.newPage();
     try {
       await seedPage.goto(eventUrl, { waitUntil: 'domcontentloaded', timeout: 45000 });
-      await new Promise(r => setTimeout(r, 800)); // Brief wait for cookies
+      await new Promise(r => setTimeout(r, 2000));
 
       const allCookies = await context.cookies();
       const tmCookies = allCookies.filter(c => c.domain.includes('ticketmaster'));
@@ -1426,8 +1426,8 @@ class BrowserPagePool {
       }
     }
 
-    // Batcher: 20 events/batch × pages, flush every 30ms for max speed
-    this._batcher = new RequestBatcher(this, 20, 30);
+    // Batcher: 20 events/batch × pages, flush every 100ms
+    this._batcher = new RequestBatcher(this, 20, 100);
 
     this._lastCookieRefresh = Date.now();
     this._consecutiveErrors = 0;
@@ -1543,7 +1543,7 @@ class BrowserPagePool {
       } catch (e) { /* fall back to homepage */ }
 
       await seedPage.goto(seedUrl, { waitUntil: 'domcontentloaded', timeout: 45000 });
-      await new Promise(r => setTimeout(r, 800)); // Brief wait for cookies
+      await new Promise(r => setTimeout(r, 2000));
 
       const tmCookies = (await context.cookies()).filter(c => c.domain.includes('ticketmaster'));
       console.log(`[PagePool] Restart: ${tmCookies.length} TM cookies after seed`);
@@ -1567,7 +1567,7 @@ class BrowserPagePool {
       }
 
       // 7. Create new batcher and mark ready
-      this._batcher = new RequestBatcher(this, 20, 30); // 30ms flush — minimize latency
+      this._batcher = new RequestBatcher(this, 20, 100);
       this._lastCookieRefresh = Date.now();
       this._consecutiveErrors = 0;
       this._requestsSinceRotation = 0;

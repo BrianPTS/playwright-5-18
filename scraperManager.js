@@ -764,12 +764,12 @@ export class ScraperManager {
       this.globalConsecutiveErrors = 0;
       this.lastCookieReset = now;
 
-      // Apply a brief cooldown for fresh cookie generation
+      // Apply a system-wide cooldown to allow for fresh cookie generation
       this.logWithTime(
-        "Applying 5-second cooldown for cookie regeneration",
+        "Applying 30-second cooldown to allow for cookie regeneration",
         "info"
       );
-      await setTimeout(5000);
+      await setTimeout(30000);
 
       // Trigger a headers refresh on the next event
       return true;
@@ -2056,7 +2056,7 @@ async updateEventMetadata(eventId, scrapeResult) {
 
         if (!claimed.length) {
           // Nothing to claim — all events are fresher than the SLA or locked
-          await setTimeout(config.PROCESSING_INTERVAL + Math.random() * 200);
+          await setTimeout(config.PROCESSING_INTERVAL * 2 + Math.random() * 1000);
           continue;
         }
 
@@ -2107,13 +2107,14 @@ async updateEventMetadata(eventId, scrapeResult) {
           }
         }
 
-        // ── Minimal cycle delay — start next batch ASAP ─────────────────
+        // ── Adaptive cycle delay ────────────────────────────────────────
+        let nextDelay = config.PROCESSING_INTERVAL;
         if (consecutiveFailures > 3) {
-          await setTimeout(config.PROCESSING_INTERVAL);
-        } else {
-          // No delay on success — immediately claim next batch
-          await setTimeout(10);
+          nextDelay = config.PROCESSING_INTERVAL * 2;
+        } else if (consecutiveFailures === 0) {
+          nextDelay = Math.max(50, config.PROCESSING_INTERVAL * 0.5);
         }
+        await setTimeout(nextDelay + Math.random() * 50);
 
       } catch (error) {
         this.logWithTime(`Concurrent processing error: ${error.message}`, "error");
@@ -2138,8 +2139,8 @@ async updateEventMetadata(eventId, scrapeResult) {
       this.eventLastFailureTime.set(eventId, now);
 
       // FAST FAILURE RECOVERY - Minimal delays for scraping failures
-      const baseDelay = 500; // Start with 0.5 seconds
-      const maxDelay = 3000; // Max 3 seconds — fail fast, retry fast
+      const baseDelay = 500; // Start with 0.5 seconds (was 2s)
+      const maxDelay = 5000; // Max 5 seconds (was 2 minutes)
 
       // Minimal exponential backoff - fail fast, retry fast
       let backoffDelay = Math.min(
@@ -2394,9 +2395,14 @@ async updateEventMetadata(eventId, scrapeResult) {
     try {
       // Skip_Scraping check already done in getEvents() — no need to re-check here.
 
-      // Check if we should skip due to very recent processing (dedup guard)
+      // Check if we should skip due to recent processing
       const lastProcessed = this.eventLastProcessedTime.get(eventId);
-      if (lastProcessed && Date.now() - lastProcessed < 2000) { // 2s dedup
+      const minInterval = 3000 + Math.random() * 2000; // 3-5 seconds
+      if (lastProcessed && Date.now() - lastProcessed < minInterval) {
+        this.logWithTime(
+          `Skipping event ${eventId} - processed recently`,
+          "info"
+        );
         return true;
       }
 
@@ -2433,7 +2439,7 @@ async updateEventMetadata(eventId, scrapeResult) {
             "warning"
           );
           if (proxyAttempts < maxProxyAttempts) {
-            await setTimeout(100 * proxyAttempts); // Minimal retry delay
+            await setTimeout(300 * proxyAttempts); // Quick progressive delay
           }
         }
       }

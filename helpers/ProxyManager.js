@@ -57,7 +57,7 @@ class ProxyManager {
   isProxyHealthy(proxy) {
     // If proxy was used recently, add cooldown (short cooldown to prevent overuse)
     const lastUsed = this.proxyLastUsed.get(proxy.proxy) || 0;
-    const cooldownTime = 500; // 500ms cooldown — minimal to allow proxy reuse
+    const cooldownTime = 3000; // 3 seconds cooldown
     if (Date.now() - lastUsed < cooldownTime) {
       return false;
     }
