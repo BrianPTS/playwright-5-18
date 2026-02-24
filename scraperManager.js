@@ -310,13 +310,13 @@ export class ScraperManager {
         this.cleanupFailureTracking();
       }, 600000);
 
-      // Periodic sync: detect events stopped in MongoDB by the frontend
-      // and clean them from Redis (every 30 seconds)
+      // Periodic sync: detect events started/stopped in MongoDB by the frontend
+      // and sync them to Redis (every 30 seconds)
       setInterval(async () => {
         try {
-          await redisLiveStore.syncSkipScrapingFromDB();
+          await redisLiveStore.syncEventsFromDB();
         } catch (err) {
-          this.logWithTime(`Skip_Scraping sync error: ${err.message}`, "warning");
+          this.logWithTime(`DB→Redis sync error: ${err.message}`, "warning");
         }
       }, 30000);
 

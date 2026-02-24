@@ -525,40 +525,77 @@ class RedisLiveStore {
   }
 
   /**
-   * Periodic sync: detect events stopped directly in MongoDB by the frontend
-   * and remove them from Redis active set + staleness sorted set.
+   * Periodic two-way sync between MongoDB and Redis.
+   *
+   * The frontend writes directly to MongoDB without notifying this backend,
+   * so we must poll for changes:
+   *   1. Detect events STOPPED in DB → remove from Redis active + staleness
+   *   2. Detect NEW/RESTARTED events in DB → add to Redis active + staleness
    *
    * Should be called on a setInterval (e.g. every 30 s).
    */
-  async syncSkipScrapingFromDB() {
+  async syncEventsFromDB() {
     if (!this.ready) return;
     try {
-      // Get all event IDs currently in the Redis active set
-      const redisActiveIds = await this.redis.smembers(KEY.active);
-      if (!redisActiveIds.length) return;
+      // ── Get current state from both sides ─────────────────────────────
+      const [redisActiveIds, dbActiveEvents] = await Promise.all([
+        this.redis.smembers(KEY.active),
+        Event.find(
+          { Skip_Scraping: { $ne: true } },
+          { Event_ID: 1, mapping_id: 1 }
+        ).lean(),
+      ]);
 
-      // Ask MongoDB which of those are actually stopped
-      const stoppedEvents = await Event.find(
-        { Event_ID: { $in: redisActiveIds }, Skip_Scraping: true },
-        { Event_ID: 1 }
-      ).lean();
+      const redisActiveSet = new Set(redisActiveIds);
+      const dbActiveSet = new Set(dbActiveEvents.map((e) => e.Event_ID));
 
-      if (!stoppedEvents.length) return;
+      // ── 1. Events stopped in DB but still active in Redis → remove ────
+      const toRemove = redisActiveIds.filter((id) => !dbActiveSet.has(id));
 
-      // Remove stopped events from Redis in a pipeline
+      // ── 2. Events active in DB but missing from Redis → add ───────────
+      const toAdd = dbActiveEvents.filter((e) => !redisActiveSet.has(e.Event_ID));
+
+      if (!toRemove.length && !toAdd.length) return; // Nothing to sync
+
       const pipe = this.redis.pipeline();
-      for (const ev of stoppedEvents) {
-        pipe.srem(KEY.active, ev.Event_ID);
-        pipe.zrem(KEY.staleness, ev.Event_ID);
-        pipe.del(KEY.lock(ev.Event_ID));
+
+      // Remove stopped events
+      for (const id of toRemove) {
+        pipe.srem(KEY.active, id);
+        pipe.zrem(KEY.staleness, id);
+        pipe.del(KEY.lock(id));
       }
+
+      // Add new/restarted events
+      for (const ev of toAdd) {
+        // Fetch full event data for Redis cache
+        const fullEvent = await Event.findOne({ Event_ID: ev.Event_ID }).lean();
+        if (fullEvent) {
+          pipe.set(KEY.event(ev.Event_ID), JSON.stringify(fullEvent));
+          pipe.sadd(KEY.all, ev.Event_ID);
+          pipe.sadd(KEY.active, ev.Event_ID);
+          // Score 0 = highest priority (will be claimed immediately)
+          pipe.zadd(KEY.staleness, 0, ev.Event_ID);
+          if (fullEvent.mapping_id) {
+            pipe.set(KEY.map(fullEvent.mapping_id), ev.Event_ID);
+          }
+        }
+      }
+
       await pipe.exec();
 
-      console.log(
-        `[RedisLiveStore] Synced ${stoppedEvents.length} stopped events from DB → removed from Redis`
-      );
+      if (toRemove.length) {
+        console.log(
+          `[RedisLiveStore] Sync: removed ${toRemove.length} stopped events from Redis`
+        );
+      }
+      if (toAdd.length) {
+        console.log(
+          `[RedisLiveStore] Sync: added ${toAdd.length} new/restarted events to Redis`
+        );
+      }
     } catch (err) {
-      console.error("[RedisLiveStore] syncSkipScrapingFromDB error:", err.message);
+      console.error("[RedisLiveStore] syncEventsFromDB error:", err.message);
     }
   }
 
