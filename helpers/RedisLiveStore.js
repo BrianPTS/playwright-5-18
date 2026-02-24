@@ -517,7 +517,7 @@ class RedisLiveStore {
     const toTry = candidates.slice(0, Math.min(candidates.length, count * 2));
     const pipe = this.redis.pipeline();
     for (const id of toTry) {
-      pipe.set(KEY.lock(id), INSTANCE_ID, "EX", 90, "NX");
+      pipe.set(KEY.lock(id), INSTANCE_ID, "EX", 180, "NX");
     }
     const results = await pipe.exec();
 
