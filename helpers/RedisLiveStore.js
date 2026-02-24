@@ -491,37 +491,22 @@ class RedisLiveStore {
   }
 
   /**
-   * Check if an event is still active (not stopped/skipped).
+   * Fast check if an event is still active (not stopped/skipped).
+   * Uses Redis SISMEMBER — O(1), sub-ms.
    *
-   * Always checks MongoDB as the source of truth because the frontend
-   * writes Skip_Scraping directly to the database without notifying this
-   * scraper backend or Redis.
-   *
-   * If the DB says the event is stopped, we also sync that to Redis
-   * immediately (remove from active set + staleness) so future cycles
-   * won't even claim it.
+   * Relies on syncEventsFromDB() (30s interval) to keep Redis in sync
+   * with MongoDB, so this stays fast without hitting the database.
    *
    * @param {string} eventId
    * @returns {Promise<boolean>}
    */
   async isEventActive(eventId) {
-    const ev = await Event.findOne(
-      { Event_ID: eventId },
-      { Skip_Scraping: 1 }
-    ).lean();
-
-    if (!ev) return false;
-
-    if (ev.Skip_Scraping) {
-      // Sync the stop to Redis so the event is cleaned up for all instances
-      if (this.ready) {
-        await this.redis.srem(KEY.active, eventId);
-        await this.redis.zrem(KEY.staleness, eventId);
-        await this.redis.del(KEY.lock(eventId));
-      }
-      return false;
+    if (!this.ready) {
+      // Fallback to MongoDB only when Redis is down
+      const ev = await Event.findOne({ Event_ID: eventId }, { Skip_Scraping: 1 }).lean();
+      return ev ? !ev.Skip_Scraping : false;
     }
-    return true;
+    return !!(await this.redis.sismember(KEY.active, eventId));
   }
 
   /**
