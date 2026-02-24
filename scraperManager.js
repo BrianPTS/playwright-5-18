@@ -2056,7 +2056,7 @@ async updateEventMetadata(eventId, scrapeResult) {
 
         if (!claimed.length) {
           // Nothing to claim — all events are fresher than the SLA or locked
-          await setTimeout(config.PROCESSING_INTERVAL * 2 + Math.random() * 1000);
+          await setTimeout(config.PROCESSING_INTERVAL + Math.random() * 200);
           continue;
         }
 
@@ -2107,14 +2107,13 @@ async updateEventMetadata(eventId, scrapeResult) {
           }
         }
 
-        // ── Adaptive cycle delay ────────────────────────────────────────
-        let nextDelay = config.PROCESSING_INTERVAL;
+        // ── Minimal cycle delay — start next batch ASAP ─────────────────
         if (consecutiveFailures > 3) {
-          nextDelay = config.PROCESSING_INTERVAL * 2;
-        } else if (consecutiveFailures === 0) {
-          nextDelay = Math.max(50, config.PROCESSING_INTERVAL * 0.5);
+          await setTimeout(config.PROCESSING_INTERVAL);
+        } else {
+          // No delay on success — immediately claim next batch
+          await setTimeout(10);
         }
-        await setTimeout(nextDelay + Math.random() * 50);
 
       } catch (error) {
         this.logWithTime(`Concurrent processing error: ${error.message}`, "error");
@@ -2393,25 +2392,11 @@ async updateEventMetadata(eventId, scrapeResult) {
     let proxy = null;
 
     try {
-      // Check if event was stopped (Skip_Scraping) before doing any work
-      const stillActive = await redisLiveStore.isEventActive(eventId);
-      if (!stillActive) {
-        this.logWithTime(
-          `Skipping event ${eventId} — stopped (Skip_Scraping=true)`,
-          "info"
-        );
-        this.cleanupEventTracking(eventId);
-        return true; // Return true so releaseEvent treats it as success (won't re-add to staleness anyway)
-      }
+      // Skip_Scraping check already done in getEvents() — no need to re-check here.
 
-      // Check if we should skip due to recent processing
+      // Check if we should skip due to very recent processing (dedup guard)
       const lastProcessed = this.eventLastProcessedTime.get(eventId);
-      const minInterval = 3000 + Math.random() * 2000; // 3-5 seconds
-      if (lastProcessed && Date.now() - lastProcessed < minInterval) {
-        this.logWithTime(
-          `Skipping event ${eventId} - processed recently`,
-          "info"
-        );
+      if (lastProcessed && Date.now() - lastProcessed < 2000) { // 2s dedup
         return true;
       }
 
@@ -2448,7 +2433,7 @@ async updateEventMetadata(eventId, scrapeResult) {
             "warning"
           );
           if (proxyAttempts < maxProxyAttempts) {
-            await setTimeout(300 * proxyAttempts); // Quick progressive delay
+            await setTimeout(100 * proxyAttempts); // Minimal retry delay
           }
         }
       }

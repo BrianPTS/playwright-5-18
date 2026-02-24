@@ -597,21 +597,21 @@ class RedisLiveStore {
   async claimEvents(count = 5) {
     if (!this.ready) return [];
 
-    const threshold = Date.now() - 30000;
+    const threshold = Date.now() - 5000; // 5s staleness — claim events ASAP
     const candidates = await this.redis.zrangebyscore(
       KEY.staleness,
       0,
       threshold,
       "LIMIT",
       0,
-      count * 3
+      count * 2
     );
     if (!candidates.length) return [];
 
-    const toTry = candidates.slice(0, Math.min(candidates.length, count * 2));
+    const toTry = candidates.slice(0, Math.min(candidates.length, count + 5));
     const pipe = this.redis.pipeline();
     for (const id of toTry) {
-      pipe.set(KEY.lock(id), INSTANCE_ID, "EX", 180, "NX");
+      pipe.set(KEY.lock(id), INSTANCE_ID, "EX", 120, "NX"); // 120s lock (was 180s)
     }
     const results = await pipe.exec();
 
