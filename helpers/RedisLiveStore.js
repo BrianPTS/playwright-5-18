@@ -33,6 +33,7 @@ const KEY = {
   hydrated: "system:hydrated",
   hydrationLock: "lock:hydration",
   staleness: "evt:staleness",
+  syncLock: "lock:sync:events",
 };
 
 // ── Write batcher config ────────────────────────────────────────────────────
@@ -389,6 +390,8 @@ class RedisLiveStore {
       if (skip) {
         await this.redis.srem(KEY.active, eventId);
         await this.removeStaleness(eventId);
+        await this.redis.del(KEY.lock(eventId)); // Release any processing lock
+        await this.redis.del(KEY.seats(eventId)); // Clear stale seat/inventory cache
       } else {
         await this.redis.sadd(KEY.active, eventId);
         await this.updateStaleness(eventId, 0);
@@ -494,7 +497,7 @@ class RedisLiveStore {
    * Fast check if an event is still active (not stopped/skipped).
    * Uses Redis SISMEMBER — O(1), sub-ms.
    *
-   * Relies on syncEventsFromDB() (30s interval) to keep Redis in sync
+   * Relies on syncEventsFromDB() (15s interval, distributed-locked) to keep Redis in sync
    * with MongoDB, so this stays fast without hitting the database.
    *
    * @param {string} eventId
@@ -521,6 +524,17 @@ class RedisLiveStore {
    */
   async syncEventsFromDB() {
     if (!this.ready) return;
+
+    // ── Distributed lock: only ONE instance out of 150+ runs this ────────
+    const lockAcquired = await this.redis.set(
+      KEY.syncLock,
+      INSTANCE_ID,
+      "EX",
+      25,   // Lock expires after 25s (sync interval is 30s)
+      "NX"  // Only set if not already held
+    );
+    if (!lockAcquired) return; // Another instance is handling the sync
+
     try {
       // ── Get current state from both sides ─────────────────────────────
       const [redisActiveIds, dbActiveEvents] = await Promise.all([
@@ -542,19 +556,33 @@ class RedisLiveStore {
 
       if (!toRemove.length && !toAdd.length) return; // Nothing to sync
 
+      // ── Batch-fetch all needed events from MongoDB in ONE query ────────
+      const idsToFetch = [
+        ...toRemove,
+        ...toAdd.map((e) => e.Event_ID),
+      ];
+      const freshEvents = idsToFetch.length
+        ? await Event.find({ Event_ID: { $in: idsToFetch } }).lean()
+        : [];
+      const freshMap = new Map(freshEvents.map((e) => [e.Event_ID, e]));
+
       const pipe = this.redis.pipeline();
 
-      // Remove stopped events
+      // Remove stopped events — update JSON blob + clear stale seat/lock data
       for (const id of toRemove) {
         pipe.srem(KEY.active, id);
         pipe.zrem(KEY.staleness, id);
         pipe.del(KEY.lock(id));
+        pipe.del(KEY.seats(id)); // Clear stale inventory/seat data
+        const freshEvent = freshMap.get(id);
+        if (freshEvent) {
+          pipe.set(KEY.event(id), JSON.stringify(freshEvent));
+        }
       }
 
       // Add new/restarted events
       for (const ev of toAdd) {
-        // Fetch full event data for Redis cache
-        const fullEvent = await Event.findOne({ Event_ID: ev.Event_ID }).lean();
+        const fullEvent = freshMap.get(ev.Event_ID);
         if (fullEvent) {
           pipe.set(KEY.event(ev.Event_ID), JSON.stringify(fullEvent));
           pipe.sadd(KEY.all, ev.Event_ID);
@@ -571,7 +599,7 @@ class RedisLiveStore {
 
       if (toRemove.length) {
         console.log(
-          `[RedisLiveStore] Sync: removed ${toRemove.length} stopped events from Redis`
+          `[RedisLiveStore] Sync: removed ${toRemove.length} stopped events from Redis (data + seats refreshed)`
         );
       }
       if (toAdd.length) {
@@ -581,6 +609,12 @@ class RedisLiveStore {
       }
     } catch (err) {
       console.error("[RedisLiveStore] syncEventsFromDB error:", err.message);
+    } finally {
+      // Release lock early so next cycle can proceed
+      const current = await this.redis.get(KEY.syncLock);
+      if (current === INSTANCE_ID) {
+        await this.redis.del(KEY.syncLock).catch(() => {});
+      }
     }
   }
 
@@ -608,7 +642,35 @@ class RedisLiveStore {
     );
     if (!candidates.length) return [];
 
-    const toTry = candidates.slice(0, Math.min(candidates.length, count * 2));
+    // Pre-filter: skip candidates that are no longer in the active set.
+    // This catches events removed by syncEventsFromDB/setSkipScraping
+    // before we waste a lock attempt on them.
+    const activePipe = this.redis.pipeline();
+    for (const id of candidates) {
+      activePipe.sismember(KEY.active, id);
+    }
+    const activeResults = await activePipe.exec();
+    const activeCandidates = candidates.filter((_, i) => {
+      const [err, isMember] = activeResults[i];
+      return !err && isMember === 1;
+    });
+
+    // Clean up stale staleness entries for stopped events
+    const staleEntries = candidates.filter((_, i) => {
+      const [err, isMember] = activeResults[i];
+      return !err && isMember === 0;
+    });
+    if (staleEntries.length) {
+      const cleanPipe = this.redis.pipeline();
+      for (const id of staleEntries) {
+        cleanPipe.zrem(KEY.staleness, id);
+      }
+      cleanPipe.exec().catch(() => {}); // Fire-and-forget cleanup
+    }
+
+    if (!activeCandidates.length) return [];
+
+    const toTry = activeCandidates.slice(0, Math.min(activeCandidates.length, count * 2));
     const pipe = this.redis.pipeline();
     for (const id of toTry) {
       pipe.set(KEY.lock(id), INSTANCE_ID, "EX", 90, "NX");
@@ -634,8 +696,9 @@ class RedisLiveStore {
   async releaseEvent(eventId, success = true) {
     if (!this.ready) return;
     const newScore = success ? Date.now() : Date.now() - 60000;
-    // Only re-add to staleness if the event is still in the active set.
-    // This prevents stopped events from being re-inserted into the scrape queue.
+    // Atomically: DEL lock (if we own it), then:
+    //   - If event is still active → ZADD to staleness (re-queue)
+    //   - If event was stopped   → ZREM from staleness (prevent re-claim)
     const lua = `
       local lock = redis.call('GET', KEYS[1])
       if lock == ARGV[1] then
@@ -643,6 +706,8 @@ class RedisLiveStore {
       end
       if redis.call('SISMEMBER', KEYS[3], ARGV[3]) == 1 then
         redis.call('ZADD', KEYS[2], ARGV[2], ARGV[3])
+      else
+        redis.call('ZREM', KEYS[2], ARGV[3])
       end
       return 1
     `;

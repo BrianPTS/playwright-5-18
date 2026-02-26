@@ -311,14 +311,15 @@ export class ScraperManager {
       }, 600000);
 
       // Periodic sync: detect events started/stopped in MongoDB by the frontend
-      // and sync them to Redis (every 30 seconds)
+      // and sync them to Redis. Only ONE instance wins the distributed lock each
+      // cycle, so 150 instances polling every 15s = 1 actual MongoDB query per 15s.
       setInterval(async () => {
         try {
           await redisLiveStore.syncEventsFromDB();
         } catch (err) {
           this.logWithTime(`DB→Redis sync error: ${err.message}`, "warning");
         }
-      }, 30000);
+      }, 15000);
 
       // Retry queue cleanup removed
 
@@ -790,13 +791,20 @@ async updateEventMetadata(eventId, scrapeResult) {
       // Get event data upfront - always fresh, no caching
       const event = await Event.findOne({ Event_ID: eventId })
         .select(
-          "priceIncreasePercentage inHandDate mapping_id Available_Seats metadata Event_Name Venue Event_DateTime"
-        ) // Added Event_Name, Venue, Event_DateTime
+          "Skip_Scraping priceIncreasePercentage inHandDate mapping_id Available_Seats metadata Event_Name Venue Event_DateTime"
+        ) // Added Skip_Scraping for stop-check, Event_Name, Venue, Event_DateTime
         .session(session)
         .read('primary'); // Force read from primary for fresh data
 
       if (!event) {
         throw new Error(`Event ${eventId} not found in database`);
+      }
+
+      // Bail early if the event was stopped while we were scraping
+      if (event.Skip_Scraping) {
+        console.log(`[SKIP ${eventId}] Event stopped during scrape — aborting metadata update`);
+        await redisLiveStore.setSkipScraping(eventId, true).catch(() => {});
+        return;
       }
 
       const priceIncreasePercentage = event.priceIncreasePercentage;
@@ -2393,7 +2401,24 @@ async updateEventMetadata(eventId, scrapeResult) {
     let proxy = null;
 
     try {
-      // Skip_Scraping check already done in getEvents() — no need to re-check here.
+      // Fresh MongoDB check: authoritative source for Skip_Scraping.
+      // Redis may be stale if the frontend wrote directly to MongoDB.
+      const eventDoc = await Event.findOne(
+        { Event_ID: eventId },
+        { Skip_Scraping: 1 }
+      ).lean();
+      if (!eventDoc || eventDoc.Skip_Scraping) {
+        this.logWithTime(
+          `Event ${eventId} is stopped (Skip_Scraping=true) — skipping scrape`,
+          "info"
+        );
+        // Immediately sync Redis so other instances don't claim it either
+        if (eventDoc) {
+          await redisLiveStore.setSkipScraping(eventId, true).catch(() => {});
+        }
+        this.cleanupEventTracking(eventId);
+        return false;
+      }
 
       // Check if we should skip due to recent processing
       const lastProcessed = this.eventLastProcessedTime.get(eventId);
