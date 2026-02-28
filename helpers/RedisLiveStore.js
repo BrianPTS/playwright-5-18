@@ -629,7 +629,17 @@ class RedisLiveStore {
    * @returns {Promise<string[]>}
    */
   async claimEvents(count = 5) {
-    if (!this.ready) return [];
+    if (!this.ready) {
+      // MongoDB fallback: get stalest active events
+      const events = await Event.find(
+        { Skip_Scraping: { $ne: true } },
+        { Event_ID: 1, Last_Updated: 1 }
+      )
+        .sort({ Last_Updated: 1 })
+        .limit(count)
+        .lean();
+      return events.map((e) => e.Event_ID);
+    }
 
     const threshold = Date.now() - 30000;
     const candidates = await this.redis.zrangebyscore(
@@ -694,7 +704,13 @@ class RedisLiveStore {
    * Lua script atomically: DEL lock (if we own it) + ZADD new staleness score.
    */
   async releaseEvent(eventId, success = true) {
-    if (!this.ready) return;
+    if (!this.ready) {
+      // MongoDB fallback: update Last_Updated so it moves to the back of the queue
+      if (success) {
+        await Event.updateOne({ Event_ID: eventId }, { $set: { Last_Updated: new Date() } }).catch(() => {});
+      }
+      return;
+    }
     const newScore = success ? Date.now() : Date.now() - 60000;
     // Atomically: DEL lock (if we own it), then:
     //   - If event is still active → ZADD to staleness (re-queue)
@@ -781,7 +797,10 @@ class RedisLiveStore {
   }
 
   async markEventProcessed(eventId) {
-    if (!this.ready) return;
+    if (!this.ready) {
+      await Event.updateOne({ Event_ID: eventId }, { $set: { Last_Updated: new Date() } }).catch(() => {});
+      return;
+    }
     const now = Date.now();
     const pipe = this.redis.pipeline();
     pipe.set(KEY.processed(eventId), now.toString(), "EX", 120);
@@ -790,7 +809,10 @@ class RedisLiveStore {
   }
 
   async getLastProcessedTime(eventId) {
-    if (!this.ready) return null;
+    if (!this.ready) {
+      const ev = await Event.findOne({ Event_ID: eventId }, { Last_Updated: 1 }).lean();
+      return ev?.Last_Updated ? new Date(ev.Last_Updated).getTime() : null;
+    }
     const val = await this.redis.get(KEY.processed(eventId));
     return val ? parseInt(val, 10) : null;
   }

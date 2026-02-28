@@ -303,7 +303,7 @@ function CreateInventoryAndLine(data, offer, event, descriptions) {
       seatType: "CONSECUTIVE",
       inHandDate: moment(event?.inHandDate).format("YYYY-MM-DD"), // Format: 2024-12-22
       // "notes": "+stub +geek +tnet +vivid +tevo +pick",
-      notes: "-tnow -tmplus -stub",
+      notes: "-tnow -tmplus ",
       tags: "AWS",
       offerId: data?.offerId,
       splitType: offer?.inventoryType?.toLowerCase() === "resale" ? "DEFAULT": "NEVERLEAVEONE" ,
@@ -338,6 +338,273 @@ function CreateInventoryAndLine(data, offer, event, descriptions) {
     section: data?.section,
   };
 }
+
+// Excluded area names for GA events (accessibility sections)
+const GA_EXCLUDED_AREAS = ['WC', 'ADA', 'ACCESSIBLE', 'WHEELCHAIR', 'HANDICAP', 'COMPANION', 'MOBILITY'];
+
+/**
+ * Process GA (General Admission) facets from the area-based facet API.
+ * Segregates tickets by price level and area, creates synthetic rows/seats.
+ */
+export const ProcessGAFacets = (gaFacetsData, event, excludeSections = null) => {
+  if (!gaFacetsData || !gaFacetsData.facets || gaFacetsData.facets.length === 0) {
+    return [];
+  }
+
+  const areas = gaFacetsData._embedded?.area || [];
+  const ticketTypes = gaFacetsData._embedded?.tickettype || [];
+  const offers = gaFacetsData._embedded?.offer || [];
+  const descriptions = gaFacetsData._embedded?.description || [];
+  const facets = gaFacetsData.facets;
+
+  let returnData = [];
+  let gaRowCounter = 1;
+
+  // Accumulators: group by section+price into single inventory lines
+  const primaryGAAccumulator = new Map();  // primary GA/Lawn
+  const resaleGAAccumulator = new Map();   // resale GA/Lawn
+
+  // Helper: build description tags from an offer (same logic as CreateInventoryAndLine)
+  const buildDescriptions = (offer, resolvedAreas, facetDescriptionId) => {
+    let allDescriptions = "";
+    let isNameAdded = false;
+
+    if (offer?.name) {
+      const offerNameLower = offer.name.toLowerCase();
+      if (offerNameLower.includes("limited/obstructed")) {
+        allDescriptions += ", Limted/Obstructed View"; isNameAdded = true;
+      } else if (offerNameLower.includes("limited view")) {
+        allDescriptions += ", Limited View"; isNameAdded = true;
+      } else if (offerNameLower.includes("obstructed")) {
+        allDescriptions += ", Obstructed View"; isNameAdded = true;
+      } else if (offerNameLower.includes("side view")) {
+        allDescriptions += ", Side View"; isNameAdded = true;
+      } else if (offerNameLower.includes("behind")) {
+        allDescriptions += ", Behind The Stage"; isNameAdded = true;
+      } else if (offerNameLower.includes("rear")) {
+        allDescriptions += ", Rear View Seating"; isNameAdded = true;
+      } else if (offerNameLower.includes("partial")) {
+        allDescriptions += ", Partial View"; isNameAdded = true;
+      }
+    }
+
+    // Look up embedded description data by facet descriptionId
+    const facetDescData = facetDescriptionId
+      ? descriptions.find(d => d.descriptionId === facetDescriptionId)
+      : null;
+
+    if (!isNameAdded && facetDescData && Array.isArray(facetDescData.descriptions)) {
+      facetDescData.descriptions.forEach((descText) => {
+        const descLower = (typeof descText === 'string' ? descText : '').toLowerCase();
+        if (descLower.includes("side view")) { allDescriptions += ", Side View"; }
+        else if (descLower.includes("behind")) { allDescriptions += ", Behind The Stage"; }
+        else if (descLower.includes("rear")) { allDescriptions += ", Rear View Seating"; }
+        else if (descLower.includes("partial")) { allDescriptions += ", Partial View"; }
+        else if (descLower.includes("limited")) { allDescriptions += ", Limited View"; }
+        else if (descLower.includes("obstructed")) { allDescriptions += ", obstructed View"; }
+        else if (descLower.includes("deaf") || descLower.includes("blind")) { allDescriptions += ", deaf/hard, blind/low"; }
+        else if (descLower.includes("uncovered")) { allDescriptions += ", Uncovered Area"; }
+        else if (descLower.includes("lawn chair")) { allDescriptions += ", No Outside Lawn Chairs"; }
+      });
+    }
+
+    if (!isNameAdded && offer?.descriptions && Array.isArray(offer.descriptions)) {
+      offer.descriptions.forEach((desc) => {
+        const descLower = (typeof desc === 'string' ? desc : desc?.description || '').toLowerCase();
+        if (descLower.includes("side view")) { allDescriptions += ", Side View"; }
+        else if (descLower.includes("behind")) { allDescriptions += ", Behind The Stage"; }
+        else if (descLower.includes("rear")) { allDescriptions += ", Rear View Seating"; }
+        else if (descLower.includes("partial")) { allDescriptions += ", Partial View"; }
+        else if (descLower.includes("limited")) { allDescriptions += ", Limited View"; }
+        else if (descLower.includes("obstructed")) { allDescriptions += ", obstructed View"; }
+        else if (descLower.includes("deaf") || descLower.includes("blind")) { allDescriptions += ", deaf/hard, blind/low"; }
+      });
+    }
+
+    if (!isNameAdded && resolvedAreas && resolvedAreas.length > 0) {
+      const areaText = `${(resolvedAreas[0].description || '')} ${(resolvedAreas[0].name || '')}`.toLowerCase();
+      if (areaText.includes("obstructed")) { allDescriptions += ", Obstructed View"; }
+      else if (areaText.includes("limited")) { allDescriptions += ", Limited View"; }
+      else if (areaText.includes("partial")) { allDescriptions += ", Partial View"; }
+    }
+
+    return allDescriptions;
+  };
+
+  // Helper: add GA/Lawn type indicator
+  const addGATypeIndicator = (sectionName) => {
+    const sectionLower = sectionName.toLowerCase();
+    if (sectionLower.includes("lawn")) return ", GA Lawn";
+    if (sectionLower.includes("standing")) return ", General Admission Standing";
+    return ", General Admission";
+  };
+
+  // Helper: calculate total cost from offer charges
+  const calculateCost = (offer, faceValue, seatCount) => {
+    if (!offer || !offer.charges || !Array.isArray(offer.charges)) return faceValue;
+    const orderProcessingFee = parseFloat(
+      offer.charges.filter(c => c?.reason === "order_processing").reduce((t, i) => t + i.amount, 0)
+    );
+    const perTicketFees = parseFloat(
+      offer.charges.filter(c => c?.reason !== "order_processing").reduce((t, i) => t + i.amount, 0)
+    );
+    const offerFaceValue = offer.faceValue || faceValue;
+    return offerFaceValue + perTicketFees + (orderProcessingFee / seatCount);
+  };
+
+  // Helper: create inventory row
+  const pushInventoryRow = (section, seatCount, totalCost, offer, sellableQuantities, splitType, allDescriptions) => {
+    const rowNum = gaRowCounter++;
+    const seats = Array.from({ length: seatCount }, (_, i) => i + 1);
+    const validSplits = sellableQuantities.filter(q => q <= seatCount);
+    const customSplit = validSplits.length > 0 ? validSplits.join(',') : `${seatCount}`;
+
+    returnData.push({
+      inventory: {
+        quantity: seatCount,
+        section: section,
+        hideSeatNumbers: true,
+        row: `GA${rowNum}`,
+        cost: totalCost,
+        seats: seats,
+        eventId: event.eventMappingId,
+        stockType: "MOBILE_TRANSFER",
+        lineType: "PURCHASE",
+        seatType: "CONSECUTIVE",
+        inHandDate: moment(event?.inHandDate).format("YYYY-MM-DD"),
+        notes: "-tnow -tmplus -stub",
+        tags: "AWS",
+        offerId: offer?.offerId || '',
+        splitType: splitType,
+        publicNotes: "xfer" + allDescriptions,
+        listPrice: totalCost,
+        customSplit: customSplit,
+        tickets: seats.map((y) => ({
+          id: 0, seatNumber: y, notes: "string",
+          cost: totalCost, faceValue: totalCost, taxedCost: totalCost, sellPrice: totalCost,
+          stockType: "HARD", eventId: 0, accountId: 0, status: "AVAILABLE", auditNote: "string",
+        })),
+      },
+      amount: 0,
+      lineItemType: "INVENTORY",
+      eventId: event?.eventId,
+      dbId: `GA${rowNum}-${section}-${event?.eventId}`,
+      seats: seats,
+      row: `GA${rowNum}`,
+      section: section,
+    });
+  };
+
+  facets.forEach((facet) => {
+    const count = facet.count || 0;
+    if (count === 0) return;
+
+    const areaIds = facet.areas || [];
+    const inventoryTypes = facet.inventoryTypes || [];
+    const offerTypes = facet.offerTypes || [];
+    const priceLevelSecnames = facet.priceLevelSecnames || [];
+    const ticketTypeIds = facet.ticketTypes || [];
+    const facetDescriptionId = facet.description || '';
+    const offerIds = facet.offers || [];
+    const listPriceRange = facet.listPriceRange || [];
+    const isResale = inventoryTypes.some(t => t.toLowerCase() === 'resale');
+
+    // Skip non-standard offer types
+    if (offerTypes.length > 0 && !offerTypes.some(t => t.toLowerCase() === 'standard')) return;
+
+    // Resolve area info and filter out accessibility areas
+    const resolvedAreas = areaIds.map(id => areas.find(a => a.areaId === id)).filter(Boolean);
+    const hasExcludedArea = resolvedAreas.some(a =>
+      GA_EXCLUDED_AREAS.some(ex => a.name?.toUpperCase().includes(ex) || a.description?.toUpperCase().includes(ex))
+    );
+    if (hasExcludedArea) return;
+
+    // Get section name from area
+    const sectionName = resolvedAreas.length > 0
+      ? resolvedAreas[0].description || resolvedAreas[0].name || 'GA'
+      : 'GA';
+
+    // For mixed events: skip areas that were already processed as reserved sections
+    if (excludeSections && excludeSections.size > 0) {
+      const sectionUpper = sectionName.toUpperCase();
+      const isReservedSection = [...excludeSections].some(s => {
+        const exUpper = s.toUpperCase();
+        return sectionUpper === exUpper || sectionUpper.includes(exUpper) || exUpper.includes(sectionUpper);
+      });
+      if (isReservedSection) return;
+    }
+
+    const faceValue = listPriceRange.length > 0 ? listPriceRange[0].min : 0;
+    const priceLevelLabel = priceLevelSecnames.length > 0 ? priceLevelSecnames[0] : '';
+    const section = priceLevelLabel ? `${sectionName} - ${priceLevelLabel}` : sectionName;
+
+    if (isResale) {
+      // RESALE GA: accumulate by section+price, combine same-price listings
+      offerIds.forEach((offerId) => {
+        const offer = offers.find(o => o.offerId === offerId);
+        if (!offer) return;
+        if (offer.protected === true) return;
+        if (offer.name === "Special Offers" || /4[\s-]*pack/i.test(offer.name) || /four[\s-]*pack/i.test(offer.name)) return;
+
+        const sellableQuantities = offer.sellableQuantities || [1];
+        const seatCount = Math.max(...sellableQuantities);
+        const offerSection = offer.section || section;
+        const totalCost = calculateCost(offer, offer.faceValue || faceValue, seatCount);
+        const costKey = Number(totalCost.toFixed(2));
+        const key = `${offerSection}|${costKey}`;
+        const allDescriptions = buildDescriptions(offer, resolvedAreas, facetDescriptionId) + addGATypeIndicator(offerSection);
+
+        if (resaleGAAccumulator.has(key)) {
+          const existing = resaleGAAccumulator.get(key);
+          existing.count += seatCount;
+        } else {
+          resaleGAAccumulator.set(key, {
+            count: seatCount, offer, sellableQuantities, allDescriptions, section: offerSection, totalCost: costKey
+          });
+        }
+      });
+    } else {
+      // PRIMARY GA: accumulate by section+price, flush as single inventory lines after loop
+      const offer = offerIds.length > 0 ? offers.find(o => o.offerId === offerIds[0]) : null;
+      if (offer) {
+        if (offer.protected === true) return;
+        if (offer.name === "Special Offers" || /4[\s-]*pack/i.test(offer.name) || /four[\s-]*pack/i.test(offer.name)) return;
+      }
+
+      const ticketTypeInfo = ticketTypeIds.length > 0
+        ? ticketTypes.find(t => t.ticketTypeId === ticketTypeIds[0])
+        : null;
+      const sellableQuantities = offer?.sellableQuantities || ticketTypeInfo?.sellableQuantities || [1, 2, 3, 4, 5, 6, 7, 8];
+      const allDescriptions = buildDescriptions(offer, resolvedAreas, facetDescriptionId) + addGATypeIndicator(sectionName);
+      const totalCost = calculateCost(offer, faceValue, count);
+
+      // Round cost to 2 decimals for grouping key
+      const costKey = Number(totalCost.toFixed(2));
+      const key = `${section}|${costKey}`;
+
+      if (primaryGAAccumulator.has(key)) {
+        const existing = primaryGAAccumulator.get(key);
+        existing.count += count;
+      } else {
+        primaryGAAccumulator.set(key, {
+          count, offer, sellableQuantities, allDescriptions, section, totalCost: costKey
+        });
+      }
+    }
+  });
+
+  // Flush accumulated primary GA: one inventory line per section+price
+  primaryGAAccumulator.forEach(({ count, offer, sellableQuantities, allDescriptions, section, totalCost }) => {
+    pushInventoryRow(section, count, totalCost, offer, sellableQuantities, 'NEVERLEAVEONE', allDescriptions);
+  });
+
+  // Flush accumulated resale GA: one inventory line per section+price
+  resaleGAAccumulator.forEach(({ count, offer, sellableQuantities, allDescriptions, section, totalCost }) => {
+    pushInventoryRow(section, count, totalCost, offer, sellableQuantities, 'DEFAULT', allDescriptions);
+  });
+
+  return returnData;
+};
 
 export const AttachRowSection = (
   data,
@@ -625,11 +892,11 @@ export const AttachRowSection = (
         return !hasDuplicate || index === 0; // Keep the first object or objects without duplicates
       });
 
-  // fs.writeFileSync(`debug/seatBatch_${event.eventId}.json`, JSON.stringify(finalData, null, 2));
+  // fs.writeFileSync(`debug/seatBatch_${event.eventMappingId}.json`, JSON.stringify(finalData, null, 2));
   
   // // Debug: Final processed data after all filters
-  // fs.writeFileSync(`debug/finalProcessed_${event.eventId}.json`, JSON.stringify(finalData, null, 2));
-  // console.log(`Final processed data written to debug/finalProcessed_${event.eventId}.json - Total items: ${finalData.length}`);
+  // fs.writeFileSync(`debug/finalProcessed_${event.eventMappingId}.json`, JSON.stringify(finalData, null, 2));
+  // console.log(`Final processed data written to debug/finalProcessed_${event.eventMappingId}.json - Total items: ${finalData.length}`);
 
   return finalData;
 };
