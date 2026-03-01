@@ -216,6 +216,8 @@ const consecutiveGroupSchema = new mongoose.Schema(
 );
 
 // Add compound unique index to prevent duplicate seat groups
+// Includes listPrice so GA rows at different price tiers don't collide
+// (same section/row/seatRange/quantity but different prices)
 consecutiveGroupSchema.index(
   {
     eventId: 1,
@@ -224,11 +226,12 @@ consecutiveGroupSchema.index(
     row: 1,
     seatRange: 1,
     seatCount: 1,
-    "inventory.quantity": 1
+    "inventory.quantity": 1,
+    "inventory.listPrice": 1
   },
   {
     unique: true,
-    name: "unique_seat_group"
+    name: "unique_seat_group_v2"
   }
 );
 

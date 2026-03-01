@@ -900,9 +900,11 @@ async updateEventMetadata(eventId, scrapeResult) {
             })
             .sort(); // Sort lexicographically as strings
 
-          // Create unique rowKey that includes seat range to avoid conflicts
+          // Create unique rowKey that includes seat range and price to avoid conflicts
+          // Price is needed for GA rows where section+row can be identical across price tiers
           const seatRange = extractedSeats.length > 0 ? `${extractedSeats[0]}-${extractedSeats[extractedSeats.length - 1]}` : 'no-seats';
-          const rowKey = `${group.section}-${group.row}-${seatRange}`;
+          const priceKey = Number(group.inventory?.listPrice || 0).toFixed(2);
+          const rowKey = `${group.section}-${group.row}-${seatRange}-${priceKey}`;
 
           existingRowMap.set(rowKey, {
             _id: group._id,
@@ -931,11 +933,12 @@ async updateEventMetadata(eventId, scrapeResult) {
             })
             .sort(); // Sort lexicographically as strings
 
-          // Create unique rowKey that includes seat range to avoid conflicts
+          // Create unique rowKey that includes seat range and price to avoid conflicts
           const seatRange = extractedSeats.length > 0 ? `${extractedSeats[0]}-${extractedSeats[extractedSeats.length - 1]}` : 'no-seats';
-          const rowKey = `${group.section}-${group.row}-${seatRange}`;
-          
+
           const basePrice = parseFloat(group.inventory.listPrice);
+          const priceKey = Number(basePrice || 0).toFixed(2);
+          const rowKey = `${group.section}-${group.row}-${seatRange}-${priceKey}`;
           const increasedPrice = basePrice < 35 
             ? basePrice + 15 
             : basePrice * (1 + priceIncreasePercentage / 100);

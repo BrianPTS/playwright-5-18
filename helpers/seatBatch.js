@@ -210,6 +210,36 @@ function getSplitType(arr, offer) {
   }
 }
 
+// Parse hidden fees embedded in offer name/description text (e.g. "$25 Club Fee", "$10 + $15")
+// Excludes amounts that match faceValue or existing charges to avoid double-counting
+function parseHiddenFees(offer) {
+  if (!offer) return 0;
+  // Check offer name first, then join descriptions array as fallback
+  const text = offer.name || (Array.isArray(offer.descriptions) ? offer.descriptions.join(' ') : '') || '';
+  if (!text) return 0;
+  const matches = text.match(/\$(\d+(?:\.\d{1,2})?)/g);
+  if (!matches) return 0;
+
+  // Collect known amounts to exclude (faceValue + all charge amounts)
+  const knownAmounts = new Set();
+  if (offer.faceValue) knownAmounts.add(Number(offer.faceValue.toFixed(2)));
+  if (offer.charges && Array.isArray(offer.charges)) {
+    offer.charges.forEach(c => {
+      if (c.amount) knownAmounts.add(Number(Math.abs(c.amount).toFixed(2)));
+    });
+  }
+
+  const faceVal = offer.faceValue || 0;
+  return matches.reduce((sum, m) => {
+    const amount = parseFloat(m.replace('$', ''));
+    // Skip if amount matches faceValue or an existing charge (avoid double-counting)
+    if (knownAmounts.has(Number(amount.toFixed(2)))) return sum;
+    // Skip amounts >= faceValue — fees are always smaller than ticket price
+    if (faceVal > 0 && amount >= faceVal) return sum;
+    return sum + amount;
+  }, 0);
+}
+
 function CreateInventoryAndLine(data, offer, event, descriptions) {
 
   let _descriptions = descriptions.find(
@@ -287,7 +317,8 @@ function CreateInventoryAndLine(data, offer, event, descriptions) {
   );
   //Face Value
   let faceValue = offer?.faceValue;
-  let totalCost = singleExtraCharges + repeatExtraCharges + faceValue;
+  let hiddenFees = parseHiddenFees(offer);
+  let totalCost = singleExtraCharges + repeatExtraCharges + faceValue + hiddenFees;
 
   return {
     inventory: {
@@ -358,11 +389,26 @@ export const ProcessGAFacets = (gaFacetsData, event, excludeSections = null) => 
   const facets = gaFacetsData.facets;
 
   let returnData = [];
-  let gaRowCounter = 1;
 
-  // Accumulators: group by section+price into single inventory lines
+  // Accumulators: group by normalized GA type+price into single inventory lines
   const primaryGAAccumulator = new Map();  // primary GA/Lawn
   const resaleGAAccumulator = new Map();   // resale GA/Lawn
+
+  // Helper: get clean row label (what shows in CSV row column)
+  const getGARowLabel = (sectionName) => {
+    const lower = (sectionName || '').toLowerCase();
+    if (lower.includes("lawn")) return "LAWN";
+    if (lower.includes("standing")) return "SRO";
+    return "GA";
+  };
+
+  // Helper: get clean section label (what shows in CSV section column)
+  const getGASectionLabel = (sectionName) => {
+    const lower = (sectionName || '').toLowerCase();
+    if (lower.includes("lawn")) return "Lawn";
+    if (lower.includes("standing")) return "General Admission Standing";
+    return "General Admission";
+  };
 
   // Helper: build description tags from an offer (same logic as CreateInventoryAndLine)
   const buildDescriptions = (offer, resolvedAreas, facetDescriptionId) => {
@@ -441,7 +487,8 @@ export const ProcessGAFacets = (gaFacetsData, event, excludeSections = null) => 
 
   // Helper: calculate total cost from offer charges
   const calculateCost = (offer, faceValue, seatCount) => {
-    if (!offer || !offer.charges || !Array.isArray(offer.charges)) return faceValue;
+    if (!offer) return faceValue;
+    if (!offer.charges || !Array.isArray(offer.charges)) return faceValue + parseHiddenFees(offer);
     const orderProcessingFee = parseFloat(
       offer.charges.filter(c => c?.reason === "order_processing").reduce((t, i) => t + i.amount, 0)
     );
@@ -449,12 +496,14 @@ export const ProcessGAFacets = (gaFacetsData, event, excludeSections = null) => 
       offer.charges.filter(c => c?.reason !== "order_processing").reduce((t, i) => t + i.amount, 0)
     );
     const offerFaceValue = offer.faceValue || faceValue;
-    return offerFaceValue + perTicketFees + (orderProcessingFee / seatCount);
+    const hiddenFees = parseHiddenFees(offer);
+    return offerFaceValue + perTicketFees + (orderProcessingFee / seatCount) + hiddenFees;
   };
 
   // Helper: create inventory row
-  const pushInventoryRow = (section, seatCount, totalCost, offer, sellableQuantities, splitType, allDescriptions) => {
-    const rowNum = gaRowCounter++;
+  const pushInventoryRow = (rawSection, seatCount, totalCost, offer, sellableQuantities, splitType, allDescriptions) => {
+    const cleanSection = getGASectionLabel(rawSection);
+    const cleanRow = getGARowLabel(rawSection);
     const seats = Array.from({ length: seatCount }, (_, i) => i + 1);
     const validSplits = sellableQuantities.filter(q => q <= seatCount);
     const customSplit = validSplits.length > 0 ? validSplits.join(',') : `${seatCount}`;
@@ -462,9 +511,9 @@ export const ProcessGAFacets = (gaFacetsData, event, excludeSections = null) => 
     returnData.push({
       inventory: {
         quantity: seatCount,
-        section: section,
+        section: cleanSection,
         hideSeatNumbers: true,
-        row: `GA${rowNum}`,
+        row: cleanRow,
         cost: totalCost,
         seats: seats,
         eventId: event.eventMappingId,
@@ -488,10 +537,10 @@ export const ProcessGAFacets = (gaFacetsData, event, excludeSections = null) => 
       amount: 0,
       lineItemType: "INVENTORY",
       eventId: event?.eventId,
-      dbId: `GA${rowNum}-${section}-${event?.eventId}`,
+      dbId: `${cleanRow}-${cleanSection}-${splitType}-${event?.eventId}`,
       seats: seats,
-      row: `GA${rowNum}`,
-      section: section,
+      row: cleanRow,
+      section: cleanSection,
     });
   };
 
@@ -502,7 +551,6 @@ export const ProcessGAFacets = (gaFacetsData, event, excludeSections = null) => 
     const areaIds = facet.areas || [];
     const inventoryTypes = facet.inventoryTypes || [];
     const offerTypes = facet.offerTypes || [];
-    const priceLevelSecnames = facet.priceLevelSecnames || [];
     const ticketTypeIds = facet.ticketTypes || [];
     const facetDescriptionId = facet.description || '';
     const offerIds = facet.offers || [];
@@ -535,11 +583,21 @@ export const ProcessGAFacets = (gaFacetsData, event, excludeSections = null) => 
     }
 
     const faceValue = listPriceRange.length > 0 ? listPriceRange[0].min : 0;
-    const priceLevelLabel = priceLevelSecnames.length > 0 ? priceLevelSecnames[0] : '';
-    const section = priceLevelLabel ? `${sectionName} - ${priceLevelLabel}` : sectionName;
+    // Use normalized section label for accumulation (e.g. "General Admission", "Lawn")
+    const normalizedSection = getGASectionLabel(sectionName);
+
+    // Extra info for section label disambiguation when multiple price tiers exist
+    const priceLevelLabel = (facet.priceLevelSecnames && facet.priceLevelSecnames.length > 0)
+      ? facet.priceLevelSecnames[0] : '';
+    // Ticket type description for public notes — skip generic "Standard"/"Resale"
+    const ticketTypeInfo = ticketTypeIds.length > 0 ? ticketTypes.find(t => t.ticketTypeId === ticketTypeIds[0]) : null;
+    const rawTTName = (ticketTypeInfo?.name || '').trim();
+    const ttLower = rawTTName.toLowerCase();
+    const ticketTypeName = (rawTTName && !ttLower.includes('standard') && !ttLower.includes('resale'))
+      ? rawTTName : '';
 
     if (isResale) {
-      // RESALE GA: accumulate by section+price, combine same-price listings
+      // RESALE GA: accumulate by normalized section+price, combine same-price listings
       offerIds.forEach((offerId) => {
         const offer = offers.find(o => o.offerId === offerId);
         if (!offer) return;
@@ -548,10 +606,10 @@ export const ProcessGAFacets = (gaFacetsData, event, excludeSections = null) => 
 
         const sellableQuantities = offer.sellableQuantities || [1];
         const seatCount = Math.max(...sellableQuantities);
-        const offerSection = offer.section || section;
+        const offerSection = offer.section || sectionName;
         const totalCost = calculateCost(offer, offer.faceValue || faceValue, seatCount);
         const costKey = Number(totalCost.toFixed(2));
-        const key = `${offerSection}|${costKey}`;
+        const key = `${normalizedSection}|${costKey}`;
         const allDescriptions = buildDescriptions(offer, resolvedAreas, facetDescriptionId) + addGATypeIndicator(offerSection);
 
         if (resaleGAAccumulator.has(key)) {
@@ -559,48 +617,62 @@ export const ProcessGAFacets = (gaFacetsData, event, excludeSections = null) => 
           existing.count += seatCount;
         } else {
           resaleGAAccumulator.set(key, {
-            count: seatCount, offer, sellableQuantities, allDescriptions, section: offerSection, totalCost: costKey
+            count: seatCount, offer, sellableQuantities, allDescriptions, section: normalizedSection, totalCost: costKey,
+            priceLevelLabel, ticketTypeName
           });
         }
       });
     } else {
-      // PRIMARY GA: accumulate by section+price, flush as single inventory lines after loop
+      // PRIMARY GA: accumulate by normalized section+price, flush as single inventory lines after loop
       const offer = offerIds.length > 0 ? offers.find(o => o.offerId === offerIds[0]) : null;
       if (offer) {
         if (offer.protected === true) return;
         if (offer.name === "Special Offers" || /4[\s-]*pack/i.test(offer.name) || /four[\s-]*pack/i.test(offer.name)) return;
       }
 
-      const ticketTypeInfo = ticketTypeIds.length > 0
-        ? ticketTypes.find(t => t.ticketTypeId === ticketTypeIds[0])
-        : null;
       const sellableQuantities = offer?.sellableQuantities || ticketTypeInfo?.sellableQuantities || [1, 2, 3, 4, 5, 6, 7, 8];
       const allDescriptions = buildDescriptions(offer, resolvedAreas, facetDescriptionId) + addGATypeIndicator(sectionName);
       const totalCost = calculateCost(offer, faceValue, count);
 
-      // Round cost to 2 decimals for grouping key
       const costKey = Number(totalCost.toFixed(2));
-      const key = `${section}|${costKey}`;
+      const key = `${normalizedSection}|${costKey}`;
 
       if (primaryGAAccumulator.has(key)) {
         const existing = primaryGAAccumulator.get(key);
         existing.count += count;
       } else {
         primaryGAAccumulator.set(key, {
-          count, offer, sellableQuantities, allDescriptions, section, totalCost: costKey
+          count, offer, sellableQuantities, allDescriptions, section: normalizedSection, totalCost: costKey,
+          priceLevelLabel, ticketTypeName
         });
       }
     }
   });
 
-  // Flush accumulated primary GA: one inventory line per section+price
-  primaryGAAccumulator.forEach(({ count, offer, sellableQuantities, allDescriptions, section, totalCost }) => {
-    pushInventoryRow(section, count, totalCost, offer, sellableQuantities, 'NEVERLEAVEONE', allDescriptions);
+  // Check if same GA type has multiple price tiers — if so, append priceLevelLabel to section
+  const hasMultiplePrimaryPrices = new Map();
+  primaryGAAccumulator.forEach(({ section }) => {
+    hasMultiplePrimaryPrices.set(section, (hasMultiplePrimaryPrices.get(section) || 0) + 1);
+  });
+  const hasMultipleResalePrices = new Map();
+  resaleGAAccumulator.forEach(({ section }) => {
+    hasMultipleResalePrices.set(section, (hasMultipleResalePrices.get(section) || 0) + 1);
   });
 
-  // Flush accumulated resale GA: one inventory line per section+price
-  resaleGAAccumulator.forEach(({ count, offer, sellableQuantities, allDescriptions, section, totalCost }) => {
-    pushInventoryRow(section, count, totalCost, offer, sellableQuantities, 'DEFAULT', allDescriptions);
+  // Flush accumulated primary GA
+  primaryGAAccumulator.forEach(({ count, offer, sellableQuantities, allDescriptions, section, totalCost, priceLevelLabel, ticketTypeName }) => {
+    const finalSection = (hasMultiplePrimaryPrices.get(section) > 1 && priceLevelLabel)
+      ? `${section} - ${priceLevelLabel}` : section;
+    const finalNotes = ticketTypeName ? allDescriptions + `, ${ticketTypeName}` : allDescriptions;
+    pushInventoryRow(finalSection, count, totalCost, offer, sellableQuantities, 'NEVERLEAVEONE', finalNotes);
+  });
+
+  // Flush accumulated resale GA
+  resaleGAAccumulator.forEach(({ count, offer, sellableQuantities, allDescriptions, section, totalCost, priceLevelLabel, ticketTypeName }) => {
+    const finalSection = (hasMultipleResalePrices.get(section) > 1 && priceLevelLabel)
+      ? `${section} - ${priceLevelLabel}` : section;
+    const finalNotes = ticketTypeName ? allDescriptions + `, ${ticketTypeName}` : allDescriptions;
+    pushInventoryRow(finalSection, count, totalCost, offer, sellableQuantities, 'DEFAULT', finalNotes);
   });
 
   return returnData;
