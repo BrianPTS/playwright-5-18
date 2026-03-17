@@ -6,7 +6,7 @@ const { HttpsProxyAgent } = require("https-proxy-agent");
 const fs = require("fs");
 import { devices } from "patchright";
 import proxyArray from "./helpers/proxy.js";
-import { AttachRowSection, ProcessGAFacets } from "./helpers/seatBatch.js";
+import { AttachRowSection } from "./helpers/seatBatch.js";
 import GenerateNanoPlaces from "./helpers/seats.js";
 import crypto from "crypto";
 import { BrowserFingerprint } from "./browserFingerprint.js";
@@ -1009,122 +1009,49 @@ async function callTicketmasterAPI(facetHeader, proxyAgent, eventId, event, mapH
       }
     }
     
-    // Facet API is always required; Map API is required for non-GA events
-    if (!DataFacets) {
-      throw new Error(`Event scraping failed - Facet API call failed.`);
+    // Both APIs must succeed to ensure data consistency
+    if (!DataFacets || !DataMap) {
+      const failedApis = [];
+      if (!DataFacets) failedApis.push('Facet API');
+      if (!DataMap) failedApis.push('Map API');
+      
+      throw new Error(`Event scraping failed - ${failedApis.join(' and ')} call(s) failed. Both APIs are required for data consistency.`);
     }
     
     // Both APIs successful — proceed with data processing
 
     // Handle the case where we have partial data
     try {
-      // Check if this is a GA event: facets lack places/section data
-      const nanoPlaces = DataFacets ? GenerateNanoPlaces(DataFacets?.facets) : [];
-      const hasReservedSections = nanoPlaces.length > 0;
-      // Detect GA/Lawn facets: entries without places data (count-only sections)
-      const hasGALawnSections = Array.isArray(DataFacets?.facets) &&
-        DataFacets.facets.some(f => !f?.places || f.places.length === 0);
-
-      let result;
-      if (!hasReservedSections) {
-        // Pure GA event — make a GA-specific facet call with area/priceLevels grouping
-        const gaFacetUrl = `https://services.ticketmaster.com/api/ismds/event/${eventId}/facets?q=available&by=inventorytypes+offertypes+area+tickettype+priceLevels+offer&show=listpricerange&resaleChannelId=internal.ecommerce.consumer.desktop.web.browser.ticketmaster.us&apikey=b462oi7fic6pehcdkzony5bxhe&apisecret=pquzpfrfz7zd2ylvtz3w5dtyse&embed=area&embed=tickettype&embed=offer&embed=description`;
-        const gaFacetUrlWithParams = `${gaFacetUrl}&_=${Date.now()}`;
-
-        let GAFacetsData = null;
-        try {
-          if (browserPagePool.initialized) {
-            const gaResult = await browserPagePool.submitRequests([
-              { url: gaFacetUrlWithParams, headers: filterForBrowser(safeFacetHeader) }
-            ]);
-            GAFacetsData = gaResult[0]?.success ? gaResult[0].data : null;
-          } else {
-            GAFacetsData = await browserApiRequest(gaFacetUrlWithParams,
-              filterForBrowser(safeFacetHeader), proxyData, cookies);
-          }
-        } catch (gaError) {
-          console.error(`GA Facet API failed for event ${eventId}: ${gaError.message}`);
-        }
-
-        if (!GAFacetsData) {
-          throw new Error(`Event ${eventId} GA facet call failed - no GA data available`);
-        }
-
-        result = ProcessGAFacets(GAFacetsData, { eventMappingId: event?.eventMappingId, inHandDate: event?.inHandDate });
-      } else {
-        // Has reserved sections — requires Map API
-        if (!DataMap) {
-          throw new Error(`Event scraping failed - Map API call failed. Map is required for non-GA events.`);
-        }
-        result = AttachRowSection(
-          nanoPlaces,
-          DataMap,
-          DataFacets?._embedded?.offer || [],
-          { eventId, inHandDate: event?.inHandDate },
-          DataFacets?._embedded?.description || {}
-        );
-
-        // Mixed event: also has GA/Lawn sections (facets without places data)
-        if (hasGALawnSections) {
-          console.log(`[Mixed Event] ${eventId} has both reserved and GA/Lawn sections — making GA facet call`);
-          const gaFacetUrl = `https://services.ticketmaster.com/api/ismds/event/${eventId}/facets?q=available&by=inventorytypes+offertypes+area+tickettype+priceLevels+offer&show=listpricerange&resaleChannelId=internal.ecommerce.consumer.desktop.web.browser.ticketmaster.us&apikey=b462oi7fic6pehcdkzony5bxhe&apisecret=pquzpfrfz7zd2ylvtz3w5dtyse&embed=area&embed=tickettype&embed=offer&embed=description`;
-          const gaFacetUrlWithParams = `${gaFacetUrl}&_=${Date.now()}`;
-
-          let GAFacetsData = null;
-          try {
-            if (browserPagePool.initialized) {
-              const gaResult = await browserPagePool.submitRequests([
-                { url: gaFacetUrlWithParams, headers: filterForBrowser(safeFacetHeader) }
-              ]);
-              GAFacetsData = gaResult[0]?.success ? gaResult[0].data : null;
-            } else {
-              GAFacetsData = await browserApiRequest(gaFacetUrlWithParams,
-                filterForBrowser(safeFacetHeader), proxyData, cookies);
-            }
-          } catch (gaError) {
-            console.error(`GA Facet API (Lawn) failed for event ${eventId}: ${gaError.message}`);
-          }
-
-          if (GAFacetsData) {
-            // Collect reserved section names to exclude from GA processing (avoid duplicates)
-            const reservedSections = new Set(nanoPlaces.map(np => np.section));
-            const lawnResult = ProcessGAFacets(GAFacetsData, { eventMappingId: event?.eventMappingId, inHandDate: event?.inHandDate }, reservedSections);
-            if (lawnResult && lawnResult.length > 0) {
-              console.log(`[Mixed Event] ${eventId} found ${lawnResult.length} GA/Lawn inventory items`);
-              result = [...(result || []), ...lawnResult];
-            }
-          }
-        }
-      }
-
+      const result = AttachRowSection(
+        DataFacets ? GenerateNanoPlaces(DataFacets?.facets) : [],
+        DataMap || {},
+        DataFacets?._embedded?.offer || [],
+        { eventId, inHandDate: event?.inHandDate },
+        DataFacets?._embedded?.description || {}
+      );
+      
       // Validate result - null or empty results should not be considered successful scrape
       if (!result || !Array.isArray(result) || result.length === 0) {
         throw new Error(`Event ${eventId} scrape validation failed - no valid seats found. Result: ${result ? 'empty array' : 'null/undefined'}`);
       }
-
+      
       // SEAT COUNT VALIDATION - Check for suspicious fluctuations
-      // Skip validation for pure GA events — GA quantities naturally fluctuate as tickets sell
-      // For mixed events, only validate reserved seat count (not GA portion)
-      const isGAOnlyEvent = !hasReservedSections;
-      if (!isGAOnlyEvent) {
-        // Use total quantity sum (not result.length) for more accurate comparison
-        const seatCount = result.reduce((sum, r) => sum + (r.inventory?.quantity || r.seats?.length || 0), 0);
-        const validation = await seatValidator.validateSeatCount(eventId, seatCount);
-
-        if (!validation.isValid && validation.shouldDelay) {
-          console.warn(
-            `[SeatValidator] ⚠️ ${validation.message} - Event ${eventId} will be delayed`
-          );
-
-          // Throw a special error that scraperManager can catch and handle
-          const delayError = new Error(`SEAT_COUNT_FLUCTUATION: ${validation.message}`);
-          delayError.isFluctuationError = true;
-          delayError.delayUntil = validation.delayUntil;
-          delayError.seatCount = seatCount;
-          delayError.previousCount = validation.previousCount;
-          delayError.trendCheck = validation.trendCheck || null;
-          throw delayError;
-        }
+      const seatCount = result.length;
+      const validation = await seatValidator.validateSeatCount(eventId, seatCount);
+      
+      if (!validation.isValid && validation.shouldDelay) {
+        console.warn(
+          `[SeatValidator] ⚠️ ${validation.message} - Event ${eventId} will be delayed`
+        );
+        
+        // Throw a special error that scraperManager can catch and handle
+        const delayError = new Error(`SEAT_COUNT_FLUCTUATION: ${validation.message}`);
+        delayError.isFluctuationError = true;
+        delayError.delayUntil = validation.delayUntil;
+        delayError.seatCount = seatCount;
+        delayError.previousCount = validation.previousCount;
+        delayError.trendCheck = validation.trendCheck || null;
+        throw delayError;
       }
       
       // Success is the normal case — only log anomalies
