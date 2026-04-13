@@ -228,6 +228,7 @@ function CreateInventoryAndLine(
   event,
   descriptions,
   resaleClassification = new Map(),
+  debugSplitLog = null,
 ) {
   let _descriptions = descriptions.find(
     (x) => x.descriptionId == data?.descriptionId,
@@ -344,6 +345,43 @@ function CreateInventoryAndLine(
   let totalFees = perOrderPerSeat + perTicketTotal;
   let totalCost = faceValue + totalFees;
 
+  const derivedSplit = getSplitType(data?.seats, offer);
+
+  // TM's sellableQuantities is the authoritative purchase-quantity rule for both primary
+  // and resale offers. Clip to the actual seat-group size so we never advertise a buy-N
+  // we can't fulfill from this consecutive group. Fall back to the heuristic only when TM
+  // didn't send the field or clipping empties the array.
+  const tmSQ = offer?.sellableQuantities;
+  let finalCustomSplit = derivedSplit;
+  let splitSource = "derived";
+  if (Array.isArray(tmSQ) && tmSQ.length > 0) {
+    const clipped = tmSQ.filter((q) => q <= data?.seats.length);
+    if (clipped.length > 0) {
+      finalCustomSplit = clipped.join(",");
+      splitSource = "tm_sellableQuantities";
+    }
+  }
+
+  if (debugSplitLog) {
+    debugSplitLog.push({
+      section: data?.section,
+      row: data?.row,
+      seats: data?.seats,
+      quantity: data?.seats.length,
+      offerId: data?.offerId,
+      offerName: offer?.name || null,
+      inventoryType: offer?.inventoryType || null,
+      tmSellableQuantities: Array.isArray(tmSQ) ? tmSQ : null,
+      tmTicketTypeUnsoldQualifier: offer?.ticketTypeUnsoldQualifier || null,
+      derivedSplit,
+      finalCustomSplit,
+      splitSource,
+      faceValue,
+      totalCost,
+      resaleType: resaleClassification.get(data?.offerId) || "unknown",
+    });
+  }
+
   return {
     inventory: {
       quantity: data?.seats.length,
@@ -373,7 +411,7 @@ function CreateInventoryAndLine(
       listPrice: totalCost,
       originalFaceValue: faceValue,
       totalFees: totalFees,
-      customSplit: getSplitType(data?.seats, offer),
+      customSplit: finalCustomSplit,
       tickets: data?.seats.map((y) => {
         return {
           id: 0,
@@ -411,6 +449,10 @@ export const AttachRowSection = (
   descriptions,
   resaleClassification = new Map(),
 ) => {
+  // Debug: collect per-resale-listing split info when DEBUG_SPLIT=1.
+  // null when disabled, so CreateInventoryAndLine skips the push entirely.
+  const debugSplitLog = process.env.DEBUG_SPLIT === "1" ? [] : null;
+
   let allAvailableSeats = GetMapSeats(mapData);
   let mapPlacesIndex = allAvailableSeats.map((x) => x.seatId);
   // fs.writeFileSync("debug/allAvailableSeats.json", JSON.stringify(allAvailableSeats));
@@ -697,6 +739,7 @@ export const AttachRowSection = (
             event,
             descriptions,
             resaleClassification,
+            debugSplitLog,
           );
         }
       } else {
@@ -733,6 +776,80 @@ export const AttachRowSection = (
   // // Debug: Final processed data after all filters
   // fs.writeFileSync(`debug/finalProcessed_${event.eventId}.json`, JSON.stringify(finalData, null, 2));
   // console.log(`Final processed data written to debug/finalProcessed_${event.eventId}.json - Total items: ${finalData.length}`);
+
+  // ── Debug: split summary for all listings (DEBUG_SPLIT=1) ────────────
+  if (debugSplitLog && debugSplitLog.length > 0) {
+    const sqPatternCounts = {};
+    const sourceCounts = { tm_sellableQuantities: 0, derived: 0 };
+    const byInventoryType = {};
+    let withSQ = 0;
+    for (const entry of debugSplitLog) {
+      const sqKey = entry.tmSellableQuantities
+        ? `[${entry.tmSellableQuantities.join(",")}]`
+        : "(none)";
+      sqPatternCounts[sqKey] = (sqPatternCounts[sqKey] || 0) + 1;
+      sourceCounts[entry.splitSource] =
+        (sourceCounts[entry.splitSource] || 0) + 1;
+      const it = entry.inventoryType || "unknown";
+      byInventoryType[it] = (byInventoryType[it] || 0) + 1;
+      if (entry.tmSellableQuantities) withSQ++;
+    }
+
+    console.log(
+      `[SplitDebug ${event.eventId}] ${debugSplitLog.length} listings | ` +
+        `TM sellableQuantities used: ${sourceCounts.tm_sellableQuantities} | ` +
+        `heuristic fallback: ${sourceCounts.derived} | ` +
+        `sellableQuantities present on offer: ${withSQ}`,
+    );
+    console.log(
+      `[SplitDebug ${event.eventId}] by inventoryType: ${JSON.stringify(byInventoryType)}`,
+    );
+    console.log(
+      `[SplitDebug ${event.eventId}] sellableQuantities distribution: ${JSON.stringify(sqPatternCounts)}`,
+    );
+
+    for (const entry of debugSplitLog) {
+      const tmRaw = entry.tmSellableQuantities
+        ? `[${entry.tmSellableQuantities.join(",")}]`
+        : "(none)";
+      console.log(
+        `[SplitDebug ${event.eventId}] [${entry.inventoryType || "?"}] ${entry.section} Row ${entry.row} Seats [${entry.seats.join(",")}] ` +
+          `qty=${entry.quantity} | TM: ${tmRaw} | ` +
+          `heuristic: ${entry.derivedSplit} | final: ${entry.finalCustomSplit} (${entry.splitSource}) | ` +
+          `$${entry.totalCost?.toFixed?.(2) ?? entry.totalCost}`,
+      );
+    }
+
+    try {
+      const debugDir = "./debug";
+      if (!fs.existsSync(debugDir)) fs.mkdirSync(debugDir, { recursive: true });
+      fs.writeFileSync(
+        `${debugDir}/splits_${event.eventId}.json`,
+        JSON.stringify(
+          {
+            eventId: event.eventId,
+            capturedAt: new Date().toISOString(),
+            totalListings: debugSplitLog.length,
+            listingsByInventoryType: byInventoryType,
+            listingsWithSellableQuantities: withSQ,
+            splitSourceCounts: sourceCounts,
+            sellableQuantitiesDistribution: sqPatternCounts,
+            listings: debugSplitLog,
+          },
+          null,
+          2,
+        ),
+      );
+      console.log(
+        `[SplitDebug ${event.eventId}] Wrote ${debugDir}/splits_${event.eventId}.json`,
+      );
+    } catch (debugErr) {
+      console.warn(
+        `[SplitDebug] Failed to write debug file: ${debugErr.message}`,
+      );
+    }
+  }
+  // ── End split debug ──────────────────────────────────────────────────
 
   return finalData;
 };

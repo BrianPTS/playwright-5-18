@@ -1020,6 +1020,58 @@ async function callTicketmasterAPI(facetHeader, proxyAgent, eventId, event, mapH
     
     // Both APIs successful — proceed with data processing
 
+    // Debug: dump raw TM offers so we can verify sellableQuantities / ticketTypeUnsoldQualifier
+    // before deciding whether to switch customSplit derivation. Gated on DEBUG_SPLIT=1.
+    if (process.env.DEBUG_SPLIT === '1' && DataFacets?._embedded?.offer) {
+      try {
+        const debugDir = './debug';
+        if (!fs.existsSync(debugDir)) fs.mkdirSync(debugDir, { recursive: true });
+        const rawOffers = DataFacets._embedded.offer;
+        const offerSummary = rawOffers.map((o) => ({
+          offerId: o.offerId,
+          name: o.name,
+          inventoryType: o.inventoryType,
+          sellableQuantities: o.sellableQuantities ?? null,
+          ticketTypeUnsoldQualifier: o.ticketTypeUnsoldQualifier ?? null,
+          listingId: o.listingId ?? null,
+          section: o.section ?? null,
+          row: o.row ?? null,
+          seatFrom: o.seatFrom ?? null,
+          seatTo: o.seatTo ?? null,
+          protected: o.protected ?? null,
+          _allKeys: Object.keys(o),
+        }));
+        const resaleOffers = rawOffers.filter(
+          (o) => o.inventoryType?.toLowerCase() === 'resale'
+        );
+        fs.writeFileSync(
+          `${debugDir}/tm_offers_${eventId}.json`,
+          JSON.stringify(
+            {
+              eventId,
+              capturedAt: new Date().toISOString(),
+              totalOffers: rawOffers.length,
+              resaleCount: resaleOffers.length,
+              resaleWithSellableQuantities: resaleOffers.filter(
+                (o) => Array.isArray(o.sellableQuantities) && o.sellableQuantities.length > 0
+              ).length,
+              resaleWithTicketTypeUnsoldQualifier: resaleOffers.filter(
+                (o) => o.ticketTypeUnsoldQualifier
+              ).length,
+              offers: offerSummary,
+            },
+            null,
+            2
+          )
+        );
+        console.log(
+          `[DebugSplit] event ${eventId}: ${rawOffers.length} offers (${resaleOffers.length} resale) → ${debugDir}/tm_offers_${eventId}.json`
+        );
+      } catch (err) {
+        console.warn(`[DebugSplit] Failed to write raw offers dump: ${err.message}`);
+      }
+    }
+
     // Handle the case where we have partial data
     try {
       const result = AttachRowSection(
