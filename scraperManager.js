@@ -879,6 +879,8 @@ async updateEventMetadata(eventId, scrapeResult) {
               "inventory.listPrice": 1,
               "inventory.quantity": 1,
               "inventory.inventoryId": 1,
+              "inventory.customSplit": 1,
+              "inventory.splitType": 1,
             }
           ).session(session).read('primary'); // Force read from primary for fresh data
 
@@ -911,6 +913,8 @@ async updateEventMetadata(eventId, scrapeResult) {
             price: group.inventory?.listPrice,
             quantity: group.inventory?.quantity,
             inventoryId: group.inventory?.inventoryId,
+            customSplit: group.inventory?.customSplit,
+            splitType: group.inventory?.splitType,
           });
         });
 
@@ -945,6 +949,8 @@ async updateEventMetadata(eventId, scrapeResult) {
             seats: extractedSeats, // Use the normalized and sorted array
             price: increasedPrice,
             quantity: group.inventory.quantity,
+            customSplit: group.inventory.customSplit,
+            splitType: group.inventory.splitType,
             groupData: group,
           });
         });
@@ -986,6 +992,10 @@ async updateEventMetadata(eventId, scrapeResult) {
             const priceChanged = Math.abs(existingPrice - newPrice) > 0.01;
             const quantityChanged =
               Number(existingData.quantity) !== Number(newData.quantity);
+            const customSplitChanged =
+              (existingData.customSplit || "") !== (newData.customSplit || "");
+            const splitTypeChanged =
+              (existingData.splitType || "") !== (newData.splitType || "");
 
             // Always preserve the existing inventory ID for updates
             // Only generate new inventory IDs for truly new inventory or deleted/re-added rows
@@ -993,7 +1003,7 @@ async updateEventMetadata(eventId, scrapeResult) {
 
             // Now, decide if the DB record needs an update for any of these fields
              // Force delete-and-insert for all changes to ensure fresh inventory IDs
-             if (seatsChanged || priceChanged || quantityChanged) {
+             if (seatsChanged || priceChanged || quantityChanged || customSplitChanged || splitTypeChanged) {
                rowsToDelete.push(existingData._id);
                rowsToInsert.push({ rowKey, data: newData });
              } else {
@@ -1193,11 +1203,7 @@ async updateEventMetadata(eventId, scrapeResult) {
                     typeof group.inventory.filesAvailable === "boolean"
                       ? group.inventory.filesAvailable
                       : false,
-                  customSplit:
-                    group.inventory.customSplit ||
-                    `${Math.ceil(group.inventory.quantity / 2)},${
-                      group.inventory.quantity
-                    }`,
+                  customSplit: group.inventory.customSplit,
                   stock_type: group.inventory.stockType || "MOBILE_TRANSFER",
                   zone: group.inventory.zone,
                   shown_quantity: group.inventory.shownQuantity,
@@ -1328,11 +1334,7 @@ async updateEventMetadata(eventId, scrapeResult) {
                     typeof group.inventory.filesAvailable === "boolean"
                       ? group.inventory.filesAvailable
                       : false,
-                  customSplit:
-                    group.inventory.customSplit ||
-                    `${Math.ceil(group.inventory.quantity / 2)},${
-                      group.inventory.quantity
-                    }`,
+                  customSplit: group.inventory.customSplit,
                   stock_type: group.inventory.stockType || "MOBILE_TRANSFER",
                   zone: group.inventory.zone,
                   shown_quantity: group.inventory.shownQuantity,

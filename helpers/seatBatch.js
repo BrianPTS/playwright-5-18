@@ -222,7 +222,7 @@ function getSplitType(arr, offer) {
   }
 }
 
-function CreateInventoryAndLine(
+export function CreateInventoryAndLine(
   data,
   offer,
   event,
@@ -347,18 +347,22 @@ function CreateInventoryAndLine(
 
   const derivedSplit = getSplitType(data?.seats, offer);
 
-  // TM's sellableQuantities is the authoritative purchase-quantity rule for both primary
-  // and resale offers. Clip to the actual seat-group size so we never advertise a buy-N
-  // we can't fulfill from this consecutive group. Fall back to the heuristic only when TM
-  // didn't send the field or clipping empties the array.
+  // Standard listings: only override the NEVERLEAVEONE heuristic when TM forces a
+  // minimum purchase of 4 or more (e.g. [4,5,6], [4,6], [5]). For min 1-3 the heuristic
+  // handles splits better and avoids stranding seats.
+  // Resale listings are always bound by whatever TM publishes for the seller.
   const tmSQ = offer?.sellableQuantities;
+  const isResale = offer?.inventoryType?.toLowerCase() === "resale";
   let finalCustomSplit = derivedSplit;
   let splitSource = "derived";
   if (Array.isArray(tmSQ) && tmSQ.length > 0) {
-    const clipped = tmSQ.filter((q) => q <= data?.seats.length);
-    if (clipped.length > 0) {
-      finalCustomSplit = clipped.join(",");
-      splitSource = "tm_sellableQuantities";
+    const minSQ = Math.min(...tmSQ);
+    if (isResale || minSQ >= 4) {
+      const clipped = tmSQ.filter((q) => q <= data?.seats.length);
+      if (clipped.length > 0) {
+        finalCustomSplit = clipped.join(",");
+        splitSource = isResale ? "tm_resale" : "tm_forced";
+      }
     }
   }
 
@@ -780,7 +784,7 @@ export const AttachRowSection = (
   // ── Debug: split summary for all listings (DEBUG_SPLIT=1) ────────────
   if (debugSplitLog && debugSplitLog.length > 0) {
     const sqPatternCounts = {};
-    const sourceCounts = { tm_sellableQuantities: 0, derived: 0 };
+    const sourceCounts = { tm_resale: 0, tm_forced: 0, derived: 0 };
     const byInventoryType = {};
     let withSQ = 0;
     for (const entry of debugSplitLog) {
@@ -797,8 +801,9 @@ export const AttachRowSection = (
 
     console.log(
       `[SplitDebug ${event.eventId}] ${debugSplitLog.length} listings | ` +
-        `TM sellableQuantities used: ${sourceCounts.tm_sellableQuantities} | ` +
-        `heuristic fallback: ${sourceCounts.derived} | ` +
+        `TM (resale): ${sourceCounts.tm_resale} | ` +
+        `TM (forced primary): ${sourceCounts.tm_forced} | ` +
+        `heuristic: ${sourceCounts.derived} | ` +
         `sellableQuantities present on offer: ${withSQ}`,
     );
     console.log(
