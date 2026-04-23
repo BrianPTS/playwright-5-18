@@ -386,6 +386,16 @@ export function CreateInventoryAndLine(
     });
   }
 
+  const resolvedResaleType = isResale
+    ? resaleClassification.get(data?.offerId) || "unknown"
+    : null;
+  const internalNote =
+    resolvedResaleType === "verified_resale"
+      ? "fan inventory"
+      : resolvedResaleType === "3rd_party_resale"
+        ? "broker"
+        : "";
+
   return {
     inventory: {
       quantity: data?.seats.length,
@@ -400,17 +410,11 @@ export function CreateInventoryAndLine(
       seatType: "CONSECUTIVE",
       inHandDate: moment(event?.inHandDate).format("YYYY-MM-DD"), // Format: 2024-12-22
       // "notes": "+stub +geek +tnet +vivid +tevo +pick",
-      notes: "-tnow -tmplus -stub",
+      notes: internalNote,
       tags: "AWS",
       offerId: data?.offerId,
-      splitType:
-        offer?.inventoryType?.toLowerCase() === "resale"
-          ? "DEFAULT"
-          : "NEVERLEAVEONE",
-      resaleType:
-        offer?.inventoryType?.toLowerCase() === "resale"
-          ? resaleClassification.get(data?.offerId) || "unknown"
-          : null,
+      splitType: isResale ? "DEFAULT" : "NEVERLEAVEONE",
+      resaleType: resolvedResaleType,
       publicNotes: "xfer" + allDescriptions,
       listPrice: totalCost,
       originalFaceValue: faceValue,
