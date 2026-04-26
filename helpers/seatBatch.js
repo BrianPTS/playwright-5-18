@@ -389,7 +389,7 @@ export function CreateInventoryAndLine(
   const resolvedResaleType = isResale
     ? resaleClassification.get(data?.offerId) || "unknown"
     : null;
-  const internalNote =
+  const classifierTag =
     resolvedResaleType === "verified_resale"
       ? "fan inventory"
       : resolvedResaleType === "3rd_party_resale"
@@ -410,8 +410,10 @@ export function CreateInventoryAndLine(
       seatType: "CONSECUTIVE",
       inHandDate: moment(event?.inHandDate).format("YYYY-MM-DD"), // Format: 2024-12-22
       // "notes": "+stub +geek +tnet +vivid +tevo +pick",
-      notes: internalNote,
-      tags: "AWS",
+      notes: "",
+      tags: isResale
+        ? classifierTag ? `resale ${classifierTag}` : "resale"
+        : "standard",
       offerId: data?.offerId,
       splitType: isResale ? "DEFAULT" : "NEVERLEAVEONE",
       resaleType: resolvedResaleType,
@@ -588,7 +590,8 @@ export const AttachRowSection = (
               x.section.toUpperCase().includes("WHEELCHAIR") ||
               x.section.toUpperCase().includes("ACCESSIBLE") ||
               x.section.toUpperCase().includes("ADA") ||
-              x.section.toUpperCase().includes("HANDICAP"))) ||
+              x.section.toUpperCase().includes("HANDICAP") ||
+              x.section.toUpperCase().includes("COMPANION"))) ||
           // Check accessibility field
           (x.accessibility && x.accessibility.length > 0) ||
           // Check attributes for accessibility terms
@@ -600,7 +603,10 @@ export const AttachRowSection = (
                 attr.toLowerCase().includes("ada") ||
                 attr.toLowerCase().includes("handicap") ||
                 attr.toLowerCase().includes("sight") ||
-                attr.toLowerCase().includes("hearing"),
+                attr.toLowerCase().includes("hearing") ||
+                attr.toLowerCase().includes("companion") ||
+                attr.toLowerCase().includes("mobility") ||
+                attr.toLowerCase().includes("transfer"),
             )) ||
           // Check offer name for accessibility terms
           (offerGet &&
@@ -608,7 +614,34 @@ export const AttachRowSection = (
             (offerGet.name?.toLowerCase().includes("wheelchair") ||
               offerGet.name?.toLowerCase().includes("accessible") ||
               offerGet.name?.toLowerCase().includes("ada") ||
-              offerGet.name?.toLowerCase().includes("handicap")));
+              offerGet.name?.toLowerCase().includes("handicap") ||
+              offerGet.name?.toLowerCase().includes("companion") ||
+              offerGet.name?.toLowerCase().includes("mobility") ||
+              offerGet.name?.toLowerCase().includes("sight") ||
+              offerGet.name?.toLowerCase().includes("hearing"))) ||
+          // Check description text via descriptionId — TM often surfaces
+          // "Wheelchair Companion" / "Companion Seat" / "Limited Mobility"
+          // only here, not in attributes.
+          (descriptions &&
+            x?.descriptionId != null &&
+            (() => {
+              const descDoc = descriptions.find?.(
+                (d) => d.descriptionId == x.descriptionId,
+              );
+              if (!descDoc?.descriptions?.length) return false;
+              const descText = descDoc.descriptions.join(" ").toLowerCase();
+              return (
+                descText.includes("wheelchair") ||
+                descText.includes("accessible") ||
+                descText.includes("ada") ||
+                descText.includes("handicap") ||
+                descText.includes("companion") ||
+                descText.includes("mobility") ||
+                descText.includes("sight") ||
+                descText.includes("hearing") ||
+                descText.includes("transfer")
+              );
+            })());
 
         if (hasAccessibilityIndicators) {
           // console.log(`Filtering out accessibility seat. Section: ${x.section}, Accessibility: ${x.accessibility}`);
