@@ -760,6 +760,30 @@ export const AttachRowSection = (
 
       // Original offer filtering logic
       if (offerGet) {
+        // Exclude "Summer of Live Promotion" wherever it shows up: offer name,
+        // offer description, TM description doc, or seat-level attributes
+        // (case-insensitive substring match).
+        const summerLiveTerm = "summer of live promotion";
+        const offerNameLowerForExclude = offerGet?.name?.toLowerCase() || "";
+        const offerDescLowerForExclude =
+          offerGet?.description?.toLowerCase() || "";
+        const attrsTextLowerForExclude = (x.attributes || [])
+          .join(" ")
+          .toLowerCase();
+        const descDocForExclude = descriptions?.find?.(
+          (d) => d.descriptionId == x.descriptionId,
+        );
+        const descTextLowerForExclude =
+          descDocForExclude?.descriptions?.join(" ").toLowerCase() || "";
+        if (
+          offerNameLowerForExclude.includes(summerLiveTerm) ||
+          offerDescLowerForExclude.includes(summerLiveTerm) ||
+          attrsTextLowerForExclude.includes(summerLiveTerm) ||
+          descTextLowerForExclude.includes(summerLiveTerm)
+        ) {
+          return undefined;
+        }
+
         if (offerGet.name == "Special Offers") {
           return undefined;
         } else if (offerGet.name == "Summer's Live 4 Pack") {
