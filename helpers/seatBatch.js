@@ -251,64 +251,67 @@ export function CreateInventoryAndLine(
     tags.add("accessibility");
   }
 
-  // Check offer name (case-insensitive)
+  // Run the same keyword scan against every text source TM gives us so
+  // phrases with words between "Limited" and "View" (e.g. "Limited Side
+  // View") still produce both Limited and Side View tags. Sources scanned:
+  //   1. offer.name        (TM's "title" on the seat popup)
+  //   2. offer.description (offer's own description field)
+  //   3. each line in the _embedded.description doc tied to descriptionId
   const offerNameLower = offer?.name?.toLowerCase() || "";
-  if (offerNameLower.includes("limited/obstructed")) {
-    if (!tags.has("obstructed")) {
-      allDescriptions += ", Limited/Obstructed View";
-      tags.add("obstructed");
-    }
-    if (!tags.has("limited")) {
-      allDescriptions += ", Limited View";
-      tags.add("limited");
-    }
-  } else {
-    if (offerNameLower.includes("obstructed") && !tags.has("obstructed")) {
-      allDescriptions += ", Obstructed View";
-      tags.add("obstructed");
-    }
-    if (offerNameLower.includes("limited view") && !tags.has("limited")) {
-      allDescriptions += ", Limited View";
-      tags.add("limited");
+  const offerDescLower = offer?.description?.toLowerCase() || "";
+  const textSources = [offerNameLower, offerDescLower];
+  if (_descriptions?.descriptions) {
+    for (const d of _descriptions.descriptions) {
+      textSources.push((d || "").toLowerCase());
     }
   }
 
-  // Always check descriptions for anything not yet tagged
-  if (_descriptions) {
-    _descriptions.descriptions.map((x) => {
-      const xl = x.toLowerCase();
-      if (xl.includes("obstructed") && !tags.has("obstructed")) {
-        allDescriptions += ", Obstructed View";
-        tags.add("obstructed");
-      }
-      if (xl.includes("limited") && !tags.has("limited")) {
-        allDescriptions += ", Limited View";
-        tags.add("limited");
-      }
-      if (xl.includes("side view") && !tags.has("side")) {
-        allDescriptions += ", Side View";
-        tags.add("side");
-      }
-      if (xl.includes("behind") && !tags.has("behind")) {
-        allDescriptions += ", Behind The Stage";
-        tags.add("behind");
-      }
-      if (xl.includes("rear") && !tags.has("rear")) {
-        allDescriptions += ", Rear View Seating";
-        tags.add("rear");
-      }
-      if (xl.includes("partial") && !tags.has("partial")) {
-        allDescriptions += ", Partial View";
-        tags.add("partial");
-      }
-      if (
-        (xl.includes("deaf") || xl.includes("blind")) &&
-        !tags.has("accessibility")
-      ) {
-        allDescriptions += ", deaf/hard, blind/low";
-        tags.add("accessibility");
-      }
-    });
+  // Handle the combined "Limited/Obstructed" phrase first so we emit the
+  // canonical "Limited/Obstructed View" label instead of two separate tags.
+  if (
+    textSources.some((t) => t.includes("limited/obstructed")) &&
+    !tags.has("obstructed")
+  ) {
+    allDescriptions += ", Limited/Obstructed View";
+    tags.add("obstructed");
+    tags.add("limited");
+  }
+
+  for (const text of textSources) {
+    if (!text) continue;
+    if (text.includes("obstructed") && !tags.has("obstructed")) {
+      allDescriptions += ", Obstructed View";
+      tags.add("obstructed");
+    }
+    // "limited" alone covers "Limited View", "Limited Side View", "Limited
+    // Rear View", etc.
+    if (text.includes("limited") && !tags.has("limited")) {
+      allDescriptions += ", Limited View";
+      tags.add("limited");
+    }
+    if (text.includes("side view") && !tags.has("side")) {
+      allDescriptions += ", Side View";
+      tags.add("side");
+    }
+    if (text.includes("behind") && !tags.has("behind")) {
+      allDescriptions += ", Behind The Stage";
+      tags.add("behind");
+    }
+    if (text.includes("rear") && !tags.has("rear")) {
+      allDescriptions += ", Rear View Seating";
+      tags.add("rear");
+    }
+    if (text.includes("partial") && !tags.has("partial")) {
+      allDescriptions += ", Partial View";
+      tags.add("partial");
+    }
+    if (
+      (text.includes("deaf") || text.includes("blind")) &&
+      !tags.has("accessibility")
+    ) {
+      allDescriptions += ", deaf/hard, blind/low";
+      tags.add("accessibility");
+    }
   }
 
   // Classify charges using TM's fee_type field when available, falling back to reason-based logic.
