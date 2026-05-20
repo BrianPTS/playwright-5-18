@@ -147,7 +147,8 @@ class Cluster {
                 count: 0,
                 accessibility:x.accessibility.length>0 && x.accessibility.includes("wheelchair")?"wheelchair":x.accessibility.length>0?x.accessibility[0]:"",
                 descriptionId:x.description,
-                attributes:x.attributes
+                attributes:x.attributes,
+                areas: x.areas || []
               })
             })
           })
@@ -168,7 +169,8 @@ class Cluster {
             count: 0,
             accessibility:x.accessibility.length>0 && x.accessibility.includes("wheelchair")?"wheelchair":x.accessibility.length>0?x.accessibility[0]:"",
             descriptionId:x.description,
-            attributes:x.attributes
+            attributes:x.attributes,
+            areas: x.areas || []
           })
         }
       }

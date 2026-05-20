@@ -143,6 +143,7 @@ function CreateConsicutiveSeats(data) {
         accessibility: item?.accessibility,
         descriptionId: item?.descriptionId,
         attributes: item?.attributes,
+        areas: item?.areas || [],
       });
     }
   });
@@ -229,6 +230,7 @@ export function CreateInventoryAndLine(
   descriptions,
   resaleClassification = new Map(),
   debugSplitLog = null,
+  limitedViewAreaIds = new Set(),
 ) {
   let _descriptions = descriptions.find(
     (x) => x.descriptionId == data?.descriptionId,
@@ -312,6 +314,31 @@ export function CreateInventoryAndLine(
       allDescriptions += ", deaf/hard, blind/low";
       tags.add("accessibility");
     }
+  }
+
+  // Area-based limited/obstructed view. TM also encodes this in the facet's
+  // `areas` array (IDs resolved against _embedded.area). Resale facets often
+  // carry a plain description code with no LBW suffix and no "limited" text,
+  // so the keyword scan above misses them — the area ID is the only signal.
+  if ((data.areas || []).some((id) => limitedViewAreaIds.has(String(id)))) {
+    if (!tags.has("limited")) {
+      allDescriptions += ", Limited View";
+      tags.add("limited");
+    }
+    if (!tags.has("obstructed")) {
+      tags.add("obstructed");
+    }
+  }
+
+  // Belt-and-suspenders: TM description codes ending in "LBW" denote
+  // LIMITED VIEW (e.g. IE5DELBW). Covers events where the area map is absent.
+  if (
+    typeof data?.descriptionId === "string" &&
+    data.descriptionId.toUpperCase().endsWith("LBW") &&
+    !tags.has("limited")
+  ) {
+    allDescriptions += ", Limited View";
+    tags.add("limited");
   }
 
   // Classify charges using TM's fee_type field when available, falling back to reason-based logic.
@@ -461,6 +488,7 @@ export const AttachRowSection = (
   event,
   descriptions,
   resaleClassification = new Map(),
+  limitedViewAreaIds = new Set(),
 ) => {
   // Debug: collect per-resale-listing split info when DEBUG_SPLIT=1.
   // null when disabled, so CreateInventoryAndLine skips the push entirely.
@@ -516,6 +544,7 @@ export const AttachRowSection = (
         accessibility: x?.accessibility,
         descriptionId: x?.descriptionId,
         attributes: x?.attributes,
+        areas: x?.areas || [],
       };
     })
     .filter(Boolean);
@@ -534,6 +563,7 @@ export const AttachRowSection = (
         accessibility: seatGroup.accessibility,
         descriptionId: seatGroup.descriptionId,
         attributes: seatGroup.attributes,
+        areas: seatGroup.areas || [],
       });
     });
   });
@@ -808,6 +838,7 @@ export const AttachRowSection = (
             descriptions,
             resaleClassification,
             debugSplitLog,
+            limitedViewAreaIds,
           );
         }
       } else {

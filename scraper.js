@@ -732,7 +732,7 @@ const ScrapeEvent = async (
 
     // Define API URLs for header optimization
     const mapUrl = `https://mapsapi.tmol.io/maps/geometry/3/event/${eventId}/placeDetailNoKeys?useHostGrids=true&app=CCP&sectionLevel=true&systemId=HOST`;
-    const facetUrl = `https://services.ticketmaster.com/api/ismds/event/${eventId}/facets?by=section+shape+attributes+available+accessibility+offer+inventoryTypes+offerTypes+description&show=places+inventoryTypes+offerTypes&embed=offer&embed=description&q=available&compress=places&resaleChannelId=internal.ecommerce.consumer.desktop.web.browser.ticketmaster.us&apikey=b462oi7fic6pehcdkzony5bxhe&apisecret=pquzpfrfz7zd2ylvtz3w5dtyse`;
+    const facetUrl = `https://services.ticketmaster.com/api/ismds/event/${eventId}/facets?by=section+shape+attributes+available+accessibility+offer+inventoryTypes+offerTypes+description&show=places+inventoryTypes+offerTypes&embed=offer&embed=description&embed=area&q=available&compress=places&resaleChannelId=internal.ecommerce.consumer.desktop.web.browser.ticketmaster.us&apikey=b462oi7fic6pehcdkzony5bxhe&apisecret=pquzpfrfz7zd2ylvtz3w5dtyse`;
 
     // Generate API-specific headers using our improved rotation system
     const mapHeaders = HeaderRotation.getRotatedHeaders(fingerprint, cookieString, mapUrl);
@@ -906,7 +906,7 @@ async function callTicketmasterAPI(facetHeader, proxyAgent, eventId, event, mapH
   
   try {
     const mapUrl = `https://mapsapi.tmol.io/maps/geometry/3/event/${eventId}/placeDetailNoKeys?useHostGrids=true&app=CCP&sectionLevel=true&systemId=HOST`;
-    const facetUrl = `https://services.ticketmaster.com/api/ismds/event/${eventId}/facets?by=section+shape+attributes+available+accessibility+offer+inventoryTypes+offerTypes+description&show=places+inventoryTypes+offerTypes&embed=offer&embed=description&q=available&compress=places&resaleChannelId=internal.ecommerce.consumer.desktop.web.browser.ticketmaster.us&apikey=b462oi7fic6pehcdkzony5bxhe&apisecret=pquzpfrfz7zd2ylvtz3w5dtyse`;
+    const facetUrl = `https://services.ticketmaster.com/api/ismds/event/${eventId}/facets?by=section+shape+attributes+available+accessibility+offer+inventoryTypes+offerTypes+description&show=places+inventoryTypes+offerTypes&embed=offer&embed=description&embed=area&q=available&compress=places&resaleChannelId=internal.ecommerce.consumer.desktop.web.browser.ticketmaster.us&apikey=b462oi7fic6pehcdkzony5bxhe&apisecret=pquzpfrfz7zd2ylvtz3w5dtyse`;
     
     // Add unique query parameters to bust cache and appear more like a browser
     const cacheBuster = Date.now();
@@ -1083,6 +1083,23 @@ async function callTicketmasterAPI(facetHeader, proxyAgent, eventId, event, mapH
       console.log(`[ResaleClassifier] Event ${eventId}: ${summary.fan} fan, ${summary.broker} broker, ${summary.total} total resale listings`);
     }
 
+    // Build the set of area IDs that denote limited/obstructed view.
+    // TM area IDs vary per event/level, so resolve them dynamically from
+    // _embedded.area by text-matching the area name/description instead of
+    // hardcoding an ID.
+    const limitedViewAreaIds = new Set();
+    for (const area of DataFacets?._embedded?.area || []) {
+      const label = `${area?.name || ""} ${area?.description || ""}`.toLowerCase();
+      if (label.includes("limited") || label.includes("obstruct")) {
+        if (area?.areaId != null) limitedViewAreaIds.add(String(area.areaId));
+      }
+    }
+    if (limitedViewAreaIds.size > 0) {
+      console.log(
+        `[LimitedView] Event ${eventId}: limited/obstructed area IDs: ${[...limitedViewAreaIds].join(", ")}`
+      );
+    }
+
     // Handle the case where we have partial data
     try {
       const result = AttachRowSection(
@@ -1091,7 +1108,8 @@ async function callTicketmasterAPI(facetHeader, proxyAgent, eventId, event, mapH
         DataFacets?._embedded?.offer || [],
         { eventId, inHandDate: event?.inHandDate },
         DataFacets?._embedded?.description || {},
-        resaleClassification
+        resaleClassification,
+        limitedViewAreaIds
       );
       
       // Validate result - null or empty results should not be considered successful scrape
