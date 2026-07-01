@@ -960,6 +960,45 @@ async function initApiBrowserContext(proxy = null, cookies = null) {
       }
     });
 
+    // Resource-block: reduce cookie-refresh bandwidth by aborting 3rd-party
+    // ad/tracker traffic (never TM domains — Akamai's sensor watches its own
+    // resources). Optionally also block media on non-TM origins.
+    //   BLOCK_TRACKERS=1  → third-party ads/analytics abort (default on)
+    //   BLOCK_MEDIA=1     → also abort image/font/media on non-TM origins
+    const BLOCK_TRACKERS = (process.env.BLOCK_TRACKERS ?? '1') !== '0';
+    const BLOCK_MEDIA = process.env.BLOCK_MEDIA === '1';
+    if (BLOCK_TRACKERS || BLOCK_MEDIA) {
+      const TRACKER_HOSTS = [
+        'google-analytics.com', 'googletagmanager.com', 'doubleclick.net',
+        'adnxs.com', 'criteo.', 'quantserve.com', 'scorecardresearch.com',
+        'casalemedia.com', 'adservice.google', 'facebook.com', 'connect.facebook.net',
+        'fbcdn.net', 'twitter.com', 'linkedin.com', 'pinterest.com',
+        'moatads.com', 'demdex.net', 'omtrdc.net', 'everesttech.net',
+        'hotjar.com', 'newrelic.com', 'nr-data.net', 'segment.io',
+        'branch.io', 'appsflyer.com', 'mparticle.com', 'tealium',
+        'optimizely.com', 'mixpanel.com', 'bing.com/action', 'msn.com/tracker',
+      ];
+      await apiContext.route('**/*', (route) => {
+        try {
+          const req = route.request();
+          const url = req.url();
+          if (BLOCK_TRACKERS && TRACKER_HOSTS.some((h) => url.includes(h))) {
+            return route.abort();
+          }
+          if (BLOCK_MEDIA) {
+            const t = req.resourceType();
+            if ((t === 'image' || t === 'font' || t === 'media') &&
+                !url.includes('ticketmaster') && !url.includes('tmol.io')) {
+              return route.abort();
+            }
+          }
+          return route.continue();
+        } catch {
+          return route.continue();
+        }
+      });
+    }
+
     // Add stealth scripts to mask automation indicators
     await apiContext.addInitScript(() => {
       Object.defineProperty(navigator, 'webdriver', { get: () => undefined });

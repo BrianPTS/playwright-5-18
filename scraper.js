@@ -19,6 +19,16 @@ import scraperManager from './scraperManager.js';
 import CookieRefreshTracker from './helpers/CookieRefreshTracker.js';
 import seatValidator from './helpers/SeatCountValidator.js';
 import { classifyResaleListings, getClassificationSummary } from './helpers/resaleClassifier.js';
+import { fetchFacetsSplit, fetchMapCached, fetchFacetsShadow } from './helpers/facetSplit.js';
+
+// Feature flags for bandwidth-reduction changes. Safe defaults ship in production:
+//   FACET_SPLIT_MODE=embed → drops `embed=description` + `embed=area` from hot poll
+//   MAP_CACHE_ENABLED=1    → per-event 24h mapsapi cache
+//   FACET_SHADOW=0         → shadow-mode parity check disabled unless explicitly enabled
+const FACET_SPLIT_MODE = (process.env.FACET_SPLIT_MODE || 'embed').toLowerCase();
+const MAP_CACHE_ENABLED = (process.env.MAP_CACHE_ENABLED ?? '1') !== '0';
+const FACET_SHADOW_MODE = process.env.FACET_SHADOW === '1';
+
 // Import functions from browser-cookies.js
 import {
   refreshCookies,
@@ -969,16 +979,49 @@ async function callTicketmasterAPI(facetHeader, proxyAgent, eventId, event, mapH
     // call, so 10 pages × 20 events = 200 events processed per cycle.
     if (browserPagePool.initialized) {
       try {
-        const batchResults = await browserPagePool.submitRequests([
-          { url: mapUrlWithParams, headers: filterForBrowser(safeMapHeader || safeFacetHeader) },
-          { url: facetUrlWithParams, headers: filterForBrowser(safeFacetHeader) }
-        ]);
+        // batchFn adapter: the split/cache module uses the same shape
+        // browserPagePool.submitRequests already returns ({success,data,error}[]).
+        const batchFn = (urls) => browserPagePool.submitRequests(urls);
+        const mapHeaders = filterForBrowser(safeMapHeader || safeFacetHeader);
+        const facetHeadersFiltered = filterForBrowser(safeFacetHeader);
 
-        DataMap = batchResults[0]?.success ? batchResults[0].data : null;
-        DataFacets = batchResults[1]?.success ? batchResults[1].data : null;
+        // --- Map: cached per-event 24h if enabled ---
+        let mapPromise;
+        if (MAP_CACHE_ENABLED) {
+          mapPromise = fetchMapCached({ eventId, batchFn, headers: mapHeaders })
+            .then((r) => ({ success: !!r.data, data: r.data, error: r.error }));
+        } else {
+          mapPromise = batchFn([{ url: mapUrlWithParams, headers: mapHeaders }])
+            .then((r) => r[0]);
+        }
 
-        if (!batchResults[0]?.success) console.log(`Map API failed for event ${eventId}: ${batchResults[0]?.error}`);
-        if (!batchResults[1]?.success) console.log(`Facet API failed for event ${eventId}: ${batchResults[1]?.error}`);
+        // --- Facets: cold/hot split when enabled ---
+        let facetPromise;
+        if (FACET_SHADOW_MODE && FACET_SPLIT_MODE !== 'off') {
+          facetPromise = fetchFacetsShadow({
+            eventId,
+            mode: FACET_SPLIT_MODE,
+            batchFn,
+            hotHeaders: facetHeadersFiltered,
+          }).then((r) => ({ success: !!r.merged, data: r.merged }));
+        } else if (FACET_SPLIT_MODE === 'off') {
+          facetPromise = batchFn([{ url: facetUrlWithParams, headers: facetHeadersFiltered }])
+            .then((r) => r[0]);
+        } else {
+          facetPromise = fetchFacetsSplit({
+            eventId,
+            mode: FACET_SPLIT_MODE,
+            batchFn,
+            hotHeaders: facetHeadersFiltered,
+          }).then((r) => ({ success: !!r.merged, data: r.merged, error: r.error }));
+        }
+
+        const [mapRes, facetRes] = await Promise.all([mapPromise, facetPromise]);
+        DataMap = mapRes?.success ? mapRes.data : null;
+        DataFacets = facetRes?.success ? facetRes.data : null;
+
+        if (!mapRes?.success) console.log(`Map API failed for event ${eventId}: ${mapRes?.error}`);
+        if (!facetRes?.success) console.log(`Facet API failed for event ${eventId}: ${facetRes?.error}`);
       } catch (batchError) {
         console.log(`Batch request failed for event ${eventId}: ${batchError.message}`);
         if (batchError.message?.includes('not initialized') ||
