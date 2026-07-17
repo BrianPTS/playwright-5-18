@@ -817,6 +817,16 @@ export const AttachRowSection = (
           return undefined;
         }
 
+        // Exclude held inventory: any offer whose ticketTypeUnsoldQualifier
+        // ends in "HOLD" (e.g. VIP5HOLD, 2PACKHOLD) is held back from
+        // general sale and shouldn't be listed.
+        if (
+          typeof offerGet?.ticketTypeUnsoldQualifier === "string" &&
+          /HOLD$/i.test(offerGet.ticketTypeUnsoldQualifier)
+        ) {
+          return undefined;
+        }
+
         if (offerGet.name == "Special Offers") {
           return undefined;
         } else if (offerGet.name == "Summer's Live 4 Pack") {
