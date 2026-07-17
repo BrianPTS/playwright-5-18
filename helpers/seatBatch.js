@@ -827,6 +827,16 @@ export const AttachRowSection = (
           return undefined;
         }
 
+        // Exclude package offers: if the offer description mentions
+        // "package", it's a bundled VIP/experience product, not a plain
+        // ticket, and shouldn't be listed.
+        if (
+          typeof offerGet?.description === "string" &&
+          /package/i.test(offerGet.description)
+        ) {
+          return undefined;
+        }
+
         if (offerGet.name == "Special Offers") {
           return undefined;
         } else if (offerGet.name == "Summer's Live 4 Pack") {
