@@ -15,6 +15,7 @@ import _ from 'lodash';
 import InventoryApi from './utils/inventoryApi.js';
 import { cleanup as cleanupBrowsers, browserPagePool } from './browser-cookies.js';
 import redisLiveStore from './helpers/RedisLiveStore.js';
+import { runSgEventJob } from './lib/sgEventJob.js';
 // CSV upload functionality removed
 let inventoryIdCounter = 0;
 
@@ -2403,6 +2404,29 @@ async updateEventMetadata(eventId, scrapeResult) {
     let proxy = null;
 
     try {
+      // SeatGeek dispatch: events flagged Source="seatgeek" bypass the TM
+      // pipeline entirely and go through the Broker Data API (or scrape
+      // fallback). Enable with ENABLE_SG_BROKER=1.
+      if (process.env.ENABLE_SG_BROKER === "1") {
+        const sgDoc = await Event.findOne(
+          { Event_ID: eventId },
+          { Source: 1, SgEventId: 1, SgEventUrl: 1, Skip_Scraping: 1 }
+        ).lean();
+        if (sgDoc?.Source === "seatgeek" && !sgDoc.Skip_Scraping) {
+          try {
+            const ok = await runSgEventJob(
+              { Event_ID: eventId, ...sgDoc },
+              { logger: (m) => this.logWithTime(m, "info") }
+            );
+            this.eventLastProcessedTime.set(eventId, Date.now());
+            return ok;
+          } catch (err) {
+            await this.logError(eventId, "SG_JOB_FAILED", err);
+            return false;
+          }
+        }
+      }
+
       // Fresh MongoDB check: authoritative source for Skip_Scraping.
       // Redis may be stale if the frontend wrote directly to MongoDB.
       const eventDoc = await Event.findOne(
