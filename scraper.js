@@ -1146,7 +1146,7 @@ async function callTicketmasterAPI(facetHeader, proxyAgent, eventId, event, mapH
     // Handle the case where we have partial data
     try {
       const result = AttachRowSection(
-        DataFacets ? GenerateNanoPlaces(DataFacets?.facets) : [],
+        DataFacets ? GenerateNanoPlaces(DataFacets?.facets, DataFacets?._embedded?.description || []) : [],
         DataMap || {},
         DataFacets?._embedded?.offer || [],
         { eventId, inHandDate: event?.inHandDate },

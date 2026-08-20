@@ -119,14 +119,42 @@ class Cluster {
     }
   } 
   
-   const GenerateNanoPlaces = (data) => {
+   const GenerateNanoPlaces = (data, descriptions = []) => {
     // fs.writeFileSync("debug/datatonanPalaces.json", JSON.stringify(data));
     if (!Array.isArray(data)) {
       return [];
     }
+    const descList = Array.isArray(descriptions) ? descriptions : [];
 
     let returnData = [];
     data.map(x => {
+      const descDoc = descList.find(d => d?.descriptionId === x?.description);
+      const descText = descDoc?.descriptions?.join(" ") || "";
+      const isParking = /parking/i.test(descText);
+
+      if (isParking && x?.offers?.length > 0) {
+        x.offers.forEach(offerId => {
+          returnData.push({
+            row: "GA",
+            section: x.section || "",
+            selection: x?.inventoryTypes?.length > 0 ? x?.inventoryTypes[0] : "",
+            offerId: offerId,
+            listingId: "",
+            places: [],
+            seats: [],
+            lowSeat: 0,
+            highSeat: 0,
+            count: 1,
+            accessibility: "",
+            descriptionId: x.description,
+            attributes: x.attributes || [],
+            areas: x.areas || [],
+            productType: "parking",
+          });
+        });
+        return;
+      }
+
       if (x?.places && x?.places.length > 0) {
         let _uData = getSeatsBatch(x?.places[0]);
         if (_uData) {

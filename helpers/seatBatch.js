@@ -235,6 +235,60 @@ export function CreateInventoryAndLine(
   let _descriptions = descriptions.find(
     (x) => x.descriptionId == data?.descriptionId,
   );
+
+  // Parking pass early-return. Parking facets come from the same TM facets
+  // response as seats but carry productType="parking" (set in seats.js when
+  // the description text matches /parking/i). One row per offer, quantity=1,
+  // no seat expansion, no split rules. Both primary + resale flow through.
+  if (data?.productType === "parking") {
+    const parkingDescText =
+      _descriptions?.descriptions?.join(" ") || "";
+    const isVipParking = /vip/i.test(parkingDescText);
+    const lotCode = parkingDescText.match(/Lot\s+([A-Z0-9]+)/i)?.[1] || data?.section || "";
+    const parkingFace = offer?.faceValue ?? offer?.listPrice ?? 0;
+    const parkingTotal = offer?.totalPrice ?? parkingFace;
+    const parkingFees = parkingTotal - parkingFace;
+
+    return {
+      inventory: {
+        quantity: 1,
+        section: data?.section || lotCode,
+        hideSeatNumbers: true,
+        row: "GA",
+        cost: parkingTotal,
+        seats: [],
+        eventId: event.eventMappingId,
+        stockType: "MOBILE_TRANSFER",
+        lineType: "PURCHASE",
+        seatType: "PARKING",
+        inHandDate: moment(event?.inHandDate).format("YYYY-MM-DD"),
+        notes: "",
+        tags: isVipParking ? "parking vip" : "parking",
+        offerId: data?.offerId,
+        splitType: "NEVERLEAVEONE",
+        resaleType: offer?.inventoryType?.toLowerCase() === "resale" ? "parking_resale" : null,
+        publicNotes: parkingDescText || "Parking Pass",
+        listPrice: parkingTotal,
+        originalFaceValue: parkingFace,
+        totalFees: parkingFees,
+        customSplit: "1",
+        productType: "parking",
+        lotCode,
+        lotDescription: parkingDescText,
+        parkingCategory: isVipParking ? "vip" : "standard",
+        tickets: [],
+      },
+      amount: 0,
+      lineItemType: "INVENTORY",
+      eventId: event?.eventMappingId,
+      dbId: `PARKING-${data?.offerId}-${event?.eventMappingId}`,
+      seats: [],
+      row: "GA",
+      section: data?.section || lotCode,
+      productType: "parking",
+    };
+  }
+
   let allDescriptions = "";
   const tags = new Set(); // track what we already appended to avoid duplicates
 
@@ -793,6 +847,22 @@ export const AttachRowSection = (
 
       // Original offer filtering logic
       if (offerGet) {
+        // Parking bypass: parking rows shouldn't be tripped by PACKAGE/HOLD/
+        // 4-pack/protected filters that target seat inventory. Ship them
+        // straight to CreateInventoryAndLine, which has its own early-return
+        // for productType === "parking".
+        if (x?.productType === "parking") {
+          return CreateInventoryAndLine(
+            x,
+            offerGet,
+            event,
+            descriptions,
+            resaleClassification,
+            debugSplitLog,
+            limitedViewAreaIds,
+          );
+        }
+
         // Exclude "Summer of Live Promotion" wherever it shows up: offer name,
         // offer description, TM description doc, or seat-level attributes
         // (case-insensitive substring match).
