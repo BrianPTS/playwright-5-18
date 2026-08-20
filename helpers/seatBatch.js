@@ -43,13 +43,18 @@ function GetMapSeats(data) {
       if (composit?.segments) {
         composit.segments.map((SECTION) => {
           if (SECTION.segments && SECTION.segments.length > 0)
-            SECTION.segments.map((ROW) => {
+            SECTION.segments.forEach((ROW, rowIndex) => {
               ROW.placesNoKeys.map((seat) => {
                 seatArray.push({
                   section: SECTION?.name,
                   row: ROW?.name,
                   seat: seat[1],
                   seatId: seat[0],
+                  // rowRank: 0-based index of this row within its section.
+                  // Ticketmaster orders SECTION.segments front-to-back, so
+                  // 0 = closest to field / stage. Works across all label
+                  // formats (numeric, A/AA/AAA, mixed) without parsing.
+                  rowRank: rowIndex,
                 });
               });
             });
@@ -486,6 +491,11 @@ export function CreateInventoryAndLine(
       section: data?.section,
       hideSeatNumbers: true,
       row: data?.row,
+      // 0-based front-to-back index from TM's SECTION.segments. Null for
+      // GA/parking/lawn or when the map lookup didn't resolve. Used
+      // downstream to run the dominated-listings exclusion regardless of
+      // row-label format (numeric, A/AA/AAA, mixed).
+      rowRank: data?.rowRank ?? null,
       cost: totalCost,
       seats: data?.seats,
       eventId: event.eventMappingId,
@@ -629,6 +639,7 @@ export const AttachRowSection = (
         return {
           ...x,
           row: x?.seats[0]?.row,
+          rowRank: x?.seats[0]?.rowRank ?? null,
           seats: x?.seats
             .map((y) => parseInt(y.seat))
             .sort((a, b) => {
