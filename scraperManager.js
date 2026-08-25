@@ -882,6 +882,8 @@ async updateEventMetadata(eventId, scrapeResult) {
               "inventory.inventoryId": 1,
               "inventory.customSplit": 1,
               "inventory.splitType": 1,
+              "inventory.firstSeenAt": 1,
+              "inventory.provisionalUntil": 1,
             }
           ).session(session).read('primary'); // Force read from primary for fresh data
 
@@ -916,6 +918,8 @@ async updateEventMetadata(eventId, scrapeResult) {
             inventoryId: group.inventory?.inventoryId,
             customSplit: group.inventory?.customSplit,
             splitType: group.inventory?.splitType,
+            firstSeenAt: group.inventory?.firstSeenAt,
+            provisionalUntil: group.inventory?.provisionalUntil,
           });
         });
 
@@ -1270,7 +1274,9 @@ async updateEventMetadata(eventId, scrapeResult) {
 
           // Insert new/updated rows with new inventory IDs
           if (rowsToInsert.length > 0) {
-            const groupsToInsert = rowsToInsert.map(({ data }) => {
+            const STANDARD_HOLD_MS = 30 * 60 * 1000;
+            const now = new Date();
+            const groupsToInsert = rowsToInsert.map(({ rowKey, data }) => {
               const group = data.groupData;
               // Convert event_date to Date object if it's a string and subtract one day
               const eventDateObj =
@@ -1281,6 +1287,25 @@ async updateEventMetadata(eventId, scrapeResult) {
               const formattedInHandDate = inHandDateObj.toISOString();
 
               const increasedPrice = data.price;
+
+              // Standard-drop 30-min hold: if this listing is tagged
+              // "standard" (primary release) and is genuinely new (not
+              // an in-place price/qty update), stamp firstSeenAt=now
+              // and provisionalUntil=now+30min. Hot events see standard
+              // drops sell out within minutes, so the CSV emitter will
+              // suppress the row until it's proven staying power. On
+              // updates (rowKey existed before), preserve the prior
+              // firstSeenAt / provisionalUntil so we don't re-hold a
+              // listing that only had a price/quantity change.
+              const tagsLower = (group.inventory.tags || '').toLowerCase();
+              const isStandard = tagsLower.split(/\s+/).includes('standard');
+              const priorExisting = existingRowMap.get(rowKey);
+              let firstSeenAt = priorExisting?.firstSeenAt || null;
+              let provisionalUntil = priorExisting?.provisionalUntil || null;
+              if (isStandard && !firstSeenAt) {
+                firstSeenAt = now;
+                provisionalUntil = new Date(now.getTime() + STANDARD_HOLD_MS);
+              }
               return {
                 eventId,
                 mapping_id,
@@ -1307,6 +1332,8 @@ async updateEventMetadata(eventId, scrapeResult) {
                   section: group.section,
                   hideSeatNumbers: group.inventory.hideSeatNumbers || true,
                   row: group.row,
+                  firstSeenAt,
+                  provisionalUntil,
                   cost: group.inventory.cost,
                   stockType: group.inventory.stockType || "MOBILE_TRANSFER",
                   lineType: group.inventory.lineType,
