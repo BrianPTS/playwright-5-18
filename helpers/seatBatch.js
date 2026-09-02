@@ -562,25 +562,29 @@ export const AttachRowSection = (
   let allAvailableSeats = GetMapSeats(mapData);
   let mapPlacesIndex = allAvailableSeats.map((x) => x.seatId);
 
-  // One-time cache of TM's row order per (venue, section). Runs
+  // One-time cache of TM's row order per (event, section). Runs
   // fire-and-forget after each successful map fetch so the dominated-
   // listings ranker in scraper-5-18 has an authoritative rowRank source
-  // that survives future TM lockouts. Skips sections already cached.
-  const venueForCache =
-    event?.Venue || event?.venue || mapData?.name || null;
-  if (venueForCache && allAvailableSeats.length > 0) {
-    persistVenueRowMapFromMapData(mapData, venueForCache, "mapsapi").catch(
-      () => {},
-    );
-  } else if (venueForCache && event?.eventMappingId) {
+  // for this event that survives future TM lockouts. Skips sections
+  // already cached for this event.
+  const eventIdForCache = event?.eventMappingId || null;
+  const venueForCache = event?.Venue || event?.venue || "";
+  if (eventIdForCache && allAvailableSeats.length > 0) {
+    persistVenueRowMapFromMapData(
+      mapData,
+      eventIdForCache,
+      venueForCache,
+      "mapsapi",
+    ).catch(() => {});
+  } else if (eventIdForCache) {
     // Path C: primary map returned nothing usable. Try the public
-    // Discovery API seatmap SVG as a last-resort populator of the venue
-    // cache. Also fire-and-forget — this scrape uses null rowRank as
-    // usual and falls back to the label-based ranker; future scrapes
-    // benefit if the fetch succeeds.
+    // Discovery API seatmap SVG as a last-resort populator of the cache
+    // for this event. Also fire-and-forget — this scrape uses null
+    // rowRank as usual and falls back to the label-based ranker; future
+    // scrapes of this event benefit if the fetch succeeds.
     import("../lib/tmDiscoveryMapFetcher.js")
       .then(({ fillCacheFromDiscoverySvg }) =>
-        fillCacheFromDiscoverySvg(event.eventMappingId, venueForCache),
+        fillCacheFromDiscoverySvg(eventIdForCache, venueForCache),
       )
       .catch(() => {});
   }

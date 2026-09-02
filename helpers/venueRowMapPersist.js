@@ -1,28 +1,35 @@
-import { VenueRowMap } from "../models/venueRowMapModel.js";
+import { EventRowMap } from "../models/venueRowMapModel.js";
 
 /**
  * One-time persist of TM's front-to-back row order for each section
- * observed in a seat-map response. Upserts VenueRowMap per (venue, section)
- * — the row order is stable across every event at the venue, so a single
- * successful fetch per pair is enough forever. Skips sections we already
- * have in the cache so we never rewrite them on subsequent scrapes.
+ * observed in a seat-map response. Upserts EventRowMap per
+ * (eventId, section) — one successful fetch per event is enough
+ * forever, and subsequent scrapes read from cache without touching the
+ * live map endpoint. Skips sections already in the cache so we never
+ * rewrite them.
  *
  * `mapData` is the raw JSON returned by mapsapi.tmol.io/…/placeDetailNoKeys.
- * `venue` is the event's Venue string (matches Event.Venue in scraper-5-18).
- * `source` records which fetch path we came from — 'mapsapi' or 'discovery'.
+ * `eventId` is the TM event id (matches Event.eventMappingId).
+ * `venue`   is stored alongside for diagnostics; not part of the key.
+ * `source`  is which fetch path we came from — 'mapsapi' or 'discovery'.
  *
  * Fails silently: this is a cache-warming side effect and must never
  * break the scrape if Mongo is temporarily unavailable or the shape is
  * unexpected.
  */
-export async function persistVenueRowMapFromMapData(mapData, venue, source = "mapsapi") {
+export async function persistVenueRowMapFromMapData(
+  mapData,
+  eventId,
+  venue = "",
+  source = "mapsapi",
+) {
   try {
-    if (!venue) return;
+    if (!eventId) return;
     const sections = extractSectionRows(mapData);
     if (sections.size === 0) return;
 
-    const existing = await VenueRowMap.find(
-      { venue, section: { $in: [...sections.keys()] } },
+    const existing = await EventRowMap.find(
+      { eventId, section: { $in: [...sections.keys()] } },
       { section: 1 },
     ).lean();
     const known = new Set((existing || []).map((d) => d.section));
@@ -33,10 +40,11 @@ export async function persistVenueRowMapFromMapData(mapData, venue, source = "ma
       if (!rows || rows.length === 0) continue;
       ops.push({
         updateOne: {
-          filter: { venue, section: sectionName },
+          filter: { eventId, section: sectionName },
           update: {
             $setOnInsert: {
-              venue,
+              eventId,
+              venue: venue || "",
               section: sectionName,
               rows,
               source,
@@ -48,13 +56,13 @@ export async function persistVenueRowMapFromMapData(mapData, venue, source = "ma
       });
     }
     if (ops.length > 0) {
-      await VenueRowMap.bulkWrite(ops, { ordered: false });
+      await EventRowMap.bulkWrite(ops, { ordered: false });
       console.log(
-        `[venueRowMap] cached ${ops.length} new sections for venue="${venue}" (source=${source})`,
+        `[eventRowMap] cached ${ops.length} new sections for event="${eventId}" venue="${venue}" (source=${source})`,
       );
     }
   } catch (err) {
-    console.warn(`[venueRowMap] persist failed: ${err?.message || err}`);
+    console.warn(`[eventRowMap] persist failed: ${err?.message || err}`);
   }
 }
 
