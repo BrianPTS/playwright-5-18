@@ -1,5 +1,6 @@
 import moment from "moment";
 import * as fs from "fs";
+import { persistVenueRowMapFromMapData } from "./venueRowMapPersist.js";
 // Function to generate unique 10-digit inventory ID
 
 // Global Filters
@@ -560,6 +561,29 @@ export const AttachRowSection = (
 
   let allAvailableSeats = GetMapSeats(mapData);
   let mapPlacesIndex = allAvailableSeats.map((x) => x.seatId);
+
+  // One-time cache of TM's row order per (venue, section). Runs
+  // fire-and-forget after each successful map fetch so the dominated-
+  // listings ranker in scraper-5-18 has an authoritative rowRank source
+  // that survives future TM lockouts. Skips sections already cached.
+  const venueForCache =
+    event?.Venue || event?.venue || mapData?.name || null;
+  if (venueForCache && allAvailableSeats.length > 0) {
+    persistVenueRowMapFromMapData(mapData, venueForCache, "mapsapi").catch(
+      () => {},
+    );
+  } else if (venueForCache && event?.eventMappingId) {
+    // Path C: primary map returned nothing usable. Try the public
+    // Discovery API seatmap SVG as a last-resort populator of the venue
+    // cache. Also fire-and-forget — this scrape uses null rowRank as
+    // usual and falls back to the label-based ranker; future scrapes
+    // benefit if the fetch succeeds.
+    import("../lib/tmDiscoveryMapFetcher.js")
+      .then(({ fillCacheFromDiscoverySvg }) =>
+        fillCacheFromDiscoverySvg(event.eventMappingId, venueForCache),
+      )
+      .catch(() => {});
+  }
   // fs.writeFileSync("debug/allAvailableSeats.json", JSON.stringify(allAvailableSeats));
   let returnData = [];
   //get all seats number by seat id
