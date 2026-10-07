@@ -1073,15 +1073,19 @@ async function browserApiRequest(url, headers = {}, proxy = null, cookies = null
         
         const text = await response.text();
         const data = JSON.parse(text);
-        // Broker resale listings come through with whole-number prices ("listPrice": 147),
-        // fan listings with a decimal ("listPrice": 147.0). JSON.parse erases that, so
-        // capture it from the raw text. See helpers/resaleClassifier.js.
+        // On some events broker resale prices are whole numbers ("listPrice": 147) and fan
+        // prices one decimal (147.0). JSON.parse erases that, so capture it from the raw
+        // text. Mirrors extractPriceSignal() in helpers/resaleClassifier.js.
         if (data && text.includes('"listPrice"')) {
-          const ids = [];
+          const wholeOfferIds = [];
+          let informative = false;
           const re = /"offerId"\s*:\s*"([A-Z0-9]+)"[^{}]*?"listPrice"\s*:\s*(-?[\d.eE+]+)/g;
           let m;
-          while ((m = re.exec(text))) if (!/[.eE]/.test(m[2])) ids.push(m[1]);
-          data.__wholePriceOfferIds = ids;
+          while ((m = re.exec(text))) {
+            if (!/[.eE]/.test(m[2])) { wholeOfferIds.push(m[1]); informative = true; }
+            else if (/\.\d$/.test(m[2])) informative = true;
+          }
+          data.__priceSignal = { wholeOfferIds, informative };
         }
         return { success: true, data, status };
         
@@ -1254,13 +1258,17 @@ class RequestBatcher {
             if (!r.ok) return { success: false, status: r.status, error: `HTTP ${r.status}` };
             const text = await r.text();
             const d = JSON.parse(text);
-            // Whole-number listPrice marks broker resale; see browserApiRequest.
+            // Raw listPrice formatting for broker detection; see browserApiRequest.
             if (d && text.includes('"listPrice"')) {
-              const ids = [];
+              const wholeOfferIds = [];
+              let informative = false;
               const re = /"offerId"\s*:\s*"([A-Z0-9]+)"[^{}]*?"listPrice"\s*:\s*(-?[\d.eE+]+)/g;
               let m;
-              while ((m = re.exec(text))) if (!/[.eE]/.test(m[2])) ids.push(m[1]);
-              d.__wholePriceOfferIds = ids;
+              while ((m = re.exec(text))) {
+                if (!/[.eE]/.test(m[2])) { wholeOfferIds.push(m[1]); informative = true; }
+                else if (/\.\d$/.test(m[2])) informative = true;
+              }
+              d.__priceSignal = { wholeOfferIds, informative };
             }
             return { success: true, data: d, status: r.status };
           } catch (e) {

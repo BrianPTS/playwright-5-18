@@ -18,16 +18,18 @@
  * - A broker who lists one pair looks isolated
  * - Ticketmaster does not expose seller type in the facets API
  *
- * Price-format signal (preferred when available):
- * - In the raw offer JSON, broker listings carry whole-number prices ("listPrice": 147)
- *   while fan listings carry a decimal ("listPrice": 147.0). Checked against the broker
- *   source (CIMS), Oct 2026: Steelers vs Colts 336/340 brokers whole-number, 0/1462
- *   fans; Jets vs Browns 909/909 brokers, 0/728 fans. JSON.parse erases the
- *   difference, so fetchers pass the offer IDs found in the raw text via
- *   findWholePriceOfferIds().
- * - Without that signal everything is tagged fan: ID clustering still tagged fans as
- *   broker on both events (gap<=100: 9 and 13; gap<=25: 0 and 10). Clustering stays
- *   available via options.clusterFallback.
+ * Price-format signal (preferred when the event has it):
+ * - TM serializes resale prices one of two ways per event. On some events (both NFL
+ *   games checked) broker listings carry whole-number prices ("listPrice": 147) and
+ *   fan listings one decimal ("listPrice": 147.0). On others (both Bruno Mars shows
+ *   checked) every price has two decimals ("722.00") and carries no seller signal.
+ * - Checked against the broker source (CIMS), Oct 2026. Price rule: Steelers vs Colts
+ *   336/340 brokers, 0/1462 fans; Jets vs Browns 909/909 brokers, 0/728 fans.
+ *   ID clustering gap<=25/size>=3: Steelers 75 brokers, 0 fans; Jets 433, 10 fans;
+ *   Bruno Oct 10 231/377, 0 fans; Bruno Oct 11 204/405, 0 fans.
+ * - So: price rule when the event uses the whole/one-decimal format, clustering when
+ *   it uses two decimals. JSON.parse erases the formatting, so fetchers pass
+ *   extractPriceSignal(rawText) along with the parsed response.
  */
 
 // Base32 alphabet (RFC 4648)
@@ -82,18 +84,28 @@ export function extractListingId(offerId) {
   }
 }
 
-const WHOLE_PRICE_RE = /"offerId"\s*:\s*"([A-Z0-9]+)"[^{}]*?"listPrice"\s*:\s*(-?[\d.eE+]+)/g;
+const LIST_PRICE_RE = /"offerId"\s*:\s*"([A-Z0-9]+)"[^{}]*?"listPrice"\s*:\s*(-?[\d.eE+]+)/g;
 
 /**
- * Offer IDs whose listPrice is written as a whole number in the raw JSON text.
+ * Read the price formatting from a raw facets/offers response.
+ * Returns { wholeOfferIds, informative }: offers whose listPrice has no decimal point,
+ * and whether this event uses the format that separates brokers (whole number vs one
+ * decimal) rather than the uniform two-decimal format.
  * Keep in sync with the inline copies in browser-cookies.js (they run in-page).
  */
-export function findWholePriceOfferIds(rawText) {
-  const ids = [];
-  for (const m of rawText.matchAll(WHOLE_PRICE_RE)) {
-    if (!/[.eE]/.test(m[2])) ids.push(m[1]);
+export function extractPriceSignal(rawText) {
+  const wholeOfferIds = [];
+  let informative = false;
+  for (const m of rawText.matchAll(LIST_PRICE_RE)) {
+    const price = m[2];
+    if (!/[.eE]/.test(price)) {
+      wholeOfferIds.push(m[1]);
+      informative = true;
+    } else if (/\.\d$/.test(price)) {
+      informative = true;
+    }
   }
-  return ids;
+  return { wholeOfferIds, informative };
 }
 
 // If every resale offer on a reasonably sized event looks whole-priced, assume TM
@@ -108,13 +120,12 @@ const MIN_OFFERS_FOR_FORMAT_CHECK = 20;
  * @param {Object} options
  * @param {number} options.clusterGap - Max gap between listing IDs to be considered same cluster (default: 25)
  * @param {number} options.minClusterSize - Min listings in a cluster to flag as broker (default: 3)
- * @param {string[]} [options.wholePriceOfferIds] - From findWholePriceOfferIds()
- * @param {boolean} [options.clusterFallback] - Use ID clustering when the price signal is
- *   missing or unusable (default: tag everything fan)
+ * @param {{wholeOfferIds: string[], informative: boolean}} [options.priceSignal] - From
+ *   extractPriceSignal(); used instead of clustering when informative
  * @returns {Map<string, string>} Map of offerId -> "verified_resale" | "3rd_party_resale"
  */
 export function classifyResaleListings(facets, options = {}) {
-  const { clusterGap = 25, minClusterSize = 3, wholePriceOfferIds, clusterFallback = false } = options;
+  const { clusterGap = 25, minClusterSize = 3, priceSignal } = options;
 
   // Step 1: Extract listing IDs from all resale facets
   const offerListingMap = new Map(); // offerId -> listingId
@@ -136,31 +147,23 @@ export function classifyResaleListings(facets, options = {}) {
     return new Map();
   }
 
-  if (Array.isArray(wholePriceOfferIds)) {
-    const wholePrice = new Set(wholePriceOfferIds);
+  if (priceSignal?.informative) {
+    const wholePrice = new Set(priceSignal.wholeOfferIds);
     let wholeCount = 0;
     for (const offerId of offerListingMap.keys()) if (wholePrice.has(offerId)) wholeCount++;
-    const formatLooksBroken =
-      offerListingMap.size >= MIN_OFFERS_FOR_FORMAT_CHECK && wholeCount === offerListingMap.size;
-    if (!formatLooksBroken) {
-      const result = new Map();
-      for (const offerId of offerListingMap.keys()) {
-        result.set(offerId, wholePrice.has(offerId) ? '3rd_party_resale' : 'verified_resale');
-      }
+    const result = new Map();
+    if (offerListingMap.size >= MIN_OFFERS_FOR_FORMAT_CHECK && wholeCount === offerListingMap.size) {
+      // A broker tagged fan is harmless, a fan tagged broker is not.
+      console.warn(
+        `[ResaleClassifier] all ${wholeCount} resale offers whole-priced; ` +
+        `TM price format looks changed, tagging all fan`
+      );
+      for (const offerId of offerListingMap.keys()) result.set(offerId, 'verified_resale');
       return result;
     }
-    console.warn(
-      `[ResaleClassifier] all ${wholeCount} resale offers whole-priced; ` +
-      `TM price format looks changed, not trusting the price signal`
-    );
-  } else {
-    console.warn('[ResaleClassifier] no raw price data for this response');
-  }
-
-  if (!clusterFallback) {
-    // A broker tagged fan is harmless, a fan tagged broker is not.
-    const result = new Map();
-    for (const offerId of offerListingMap.keys()) result.set(offerId, 'verified_resale');
+    for (const offerId of offerListingMap.keys()) {
+      result.set(offerId, wholePrice.has(offerId) ? '3rd_party_resale' : 'verified_resale');
+    }
     return result;
   }
 
@@ -218,4 +221,4 @@ export function getClassificationSummary(classificationMap) {
   return { fan, broker, total: fan + broker };
 }
 
-export default { classifyResaleListings, getClassificationSummary, extractListingId, findWholePriceOfferIds };
+export default { classifyResaleListings, getClassificationSummary, extractListingId, extractPriceSignal };
