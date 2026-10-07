@@ -18,7 +18,7 @@ import { CookieManager } from './helpers/CookieManager.js';
 import scraperManager from './scraperManager.js';
 import CookieRefreshTracker from './helpers/CookieRefreshTracker.js';
 import seatValidator from './helpers/SeatCountValidator.js';
-import { classifyResaleListings, getClassificationSummary } from './helpers/resaleClassifier.js';
+import { classifyResaleListings, getClassificationSummary, findWholePriceOfferIds } from './helpers/resaleClassifier.js';
 // Import functions from browser-cookies.js
 import {
   refreshCookies,
@@ -579,7 +579,11 @@ const GetData = async (headers, proxyAgent, url, eventId) => {
         return false;
       }
       
-      return JSON.parse(response.body);
+      const data = JSON.parse(response.body);
+      if (data && response.body.includes('"listPrice"')) {
+        data.__wholePriceOfferIds = findWholePriceOfferIds(response.body);
+      }
+      return data;
     } catch (error) {
       clearTimeout(timeout);
       console.log(`Request failed: ${error.message}`);
@@ -1075,7 +1079,9 @@ async function callTicketmasterAPI(facetHeader, proxyAgent, eventId, event, mapH
 
     // Classify resale listings as fan (verified_resale) vs broker (3rd_party_resale)
     const resaleClassification = DataFacets?.facets
-      ? classifyResaleListings(DataFacets.facets)
+      ? classifyResaleListings(DataFacets.facets, {
+          wholePriceOfferIds: DataFacets.__wholePriceOfferIds,
+        })
       : new Map();
 
     if (resaleClassification.size > 0) {

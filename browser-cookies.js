@@ -1071,7 +1071,18 @@ async function browserApiRequest(url, headers = {}, proxy = null, cookies = null
           };
         }
         
-        const data = await response.json();
+        const text = await response.text();
+        const data = JSON.parse(text);
+        // Broker resale listings come through with whole-number prices ("listPrice": 147),
+        // fan listings with a decimal ("listPrice": 147.0). JSON.parse erases that, so
+        // capture it from the raw text. See helpers/resaleClassifier.js.
+        if (data && text.includes('"listPrice"')) {
+          const ids = [];
+          const re = /"offerId"\s*:\s*"([A-Z0-9]+)"[^{}]*?"listPrice"\s*:\s*(-?[\d.eE+]+)/g;
+          let m;
+          while ((m = re.exec(text))) if (!/[.eE]/.test(m[2])) ids.push(m[1]);
+          data.__wholePriceOfferIds = ids;
+        }
         return { success: true, data, status };
         
       } catch (error) {
@@ -1241,7 +1252,16 @@ class RequestBatcher {
               mode: 'cors'
             });
             if (!r.ok) return { success: false, status: r.status, error: `HTTP ${r.status}` };
-            const d = await r.json();
+            const text = await r.text();
+            const d = JSON.parse(text);
+            // Whole-number listPrice marks broker resale; see browserApiRequest.
+            if (d && text.includes('"listPrice"')) {
+              const ids = [];
+              const re = /"offerId"\s*:\s*"([A-Z0-9]+)"[^{}]*?"listPrice"\s*:\s*(-?[\d.eE+]+)/g;
+              let m;
+              while ((m = re.exec(text))) if (!/[.eE]/.test(m[2])) ids.push(m[1]);
+              d.__wholePriceOfferIds = ids;
+            }
             return { success: true, data: d, status: r.status };
           } catch (e) {
             return { success: false, error: e.message, status: 0 };

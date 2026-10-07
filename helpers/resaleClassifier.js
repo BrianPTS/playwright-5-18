@@ -17,6 +17,15 @@
  * - A fan who lists tickets for multiple events at once could appear clustered
  * - A broker who lists one pair looks isolated
  * - Ticketmaster does not expose seller type in the facets API
+ *
+ * Price-format signal (preferred when available):
+ * - In the raw offer JSON, broker listings carry whole-number prices ("listPrice": 147)
+ *   while fan listings carry a decimal ("listPrice": 147.0). Checked against the broker
+ *   source (CIMS) on Steelers vs Colts, Oct 2026: 336/340 brokers whole-number, 0/1462
+ *   fans. JSON.parse erases the difference, so fetchers pass the offer IDs found in
+ *   the raw text via findWholePriceOfferIds().
+ * - Cluster fallback thresholds are tuned so no fan is tagged broker on that same
+ *   check (gap<=25/size>=3: 75 brokers, 0 fans; the old gap<=100: 91 brokers, 9 fans).
  */
 
 // Base32 alphabet (RFC 4648)
@@ -71,17 +80,37 @@ export function extractListingId(offerId) {
   }
 }
 
+const WHOLE_PRICE_RE = /"offerId"\s*:\s*"([A-Z0-9]+)"[^{}]*?"listPrice"\s*:\s*(-?[\d.eE+]+)/g;
+
+/**
+ * Offer IDs whose listPrice is written as a whole number in the raw JSON text.
+ * Keep in sync with the inline copies in browser-cookies.js (they run in-page).
+ */
+export function findWholePriceOfferIds(rawText) {
+  const ids = [];
+  for (const m of rawText.matchAll(WHOLE_PRICE_RE)) {
+    if (!/[.eE]/.test(m[2])) ids.push(m[1]);
+  }
+  return ids;
+}
+
+// If more than this share of resale offers look whole-priced, assume TM changed its
+// price formatting and fall back to clustering rather than tagging everything broker.
+const MAX_WHOLE_PRICE_SHARE = 0.5;
+
 /**
  * Classify resale listings from facets data.
  *
  * @param {Array} facets - Raw facets array from the ISMDS API response
  * @param {Object} options
- * @param {number} options.clusterGap - Max gap between listing IDs to be considered same cluster (default: 100)
+ * @param {number} options.clusterGap - Max gap between listing IDs to be considered same cluster (default: 25)
  * @param {number} options.minClusterSize - Min listings in a cluster to flag as broker (default: 3)
+ * @param {string[]} [options.wholePriceOfferIds] - From findWholePriceOfferIds(); when present,
+ *   used instead of clustering
  * @returns {Map<string, string>} Map of offerId -> "verified_resale" | "3rd_party_resale"
  */
 export function classifyResaleListings(facets, options = {}) {
-  const { clusterGap = 100, minClusterSize = 3 } = options;
+  const { clusterGap = 25, minClusterSize = 3, wholePriceOfferIds } = options;
 
   // Step 1: Extract listing IDs from all resale facets
   const offerListingMap = new Map(); // offerId -> listingId
@@ -101,6 +130,23 @@ export function classifyResaleListings(facets, options = {}) {
 
   if (offerListingMap.size === 0) {
     return new Map();
+  }
+
+  if (Array.isArray(wholePriceOfferIds)) {
+    const wholePrice = new Set(wholePriceOfferIds);
+    let wholeCount = 0;
+    for (const offerId of offerListingMap.keys()) if (wholePrice.has(offerId)) wholeCount++;
+    if (wholeCount / offerListingMap.size <= MAX_WHOLE_PRICE_SHARE) {
+      const result = new Map();
+      for (const offerId of offerListingMap.keys()) {
+        result.set(offerId, wholePrice.has(offerId) ? '3rd_party_resale' : 'verified_resale');
+      }
+      return result;
+    }
+    console.warn(
+      `[ResaleClassifier] ${wholeCount}/${offerListingMap.size} resale offers whole-priced; ` +
+      `price format looks changed, falling back to ID clustering`
+    );
   }
 
   // Step 2: Sort all listing IDs and find clusters
@@ -157,4 +203,4 @@ export function getClassificationSummary(classificationMap) {
   return { fan, broker, total: fan + broker };
 }
 
-export default { classifyResaleListings, getClassificationSummary, extractListingId };
+export default { classifyResaleListings, getClassificationSummary, extractListingId, findWholePriceOfferIds };
