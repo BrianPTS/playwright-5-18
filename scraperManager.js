@@ -884,6 +884,7 @@ async updateEventMetadata(eventId, scrapeResult) {
               "inventory.customSplit": 1,
               "inventory.splitType": 1,
               "inventory.tags": 1,
+              "inventory.offerId": 1,
             }
           ).session(session).read('primary'); // Force read from primary for fresh data
 
@@ -892,6 +893,19 @@ async updateEventMetadata(eventId, scrapeResult) {
         // itself flagged are stored; tags written before this existed are not imported.
         const isBrokerTag = (tags) => /broker/i.test(tags || "");
         const knownBrokerIds = new Set(event.brokerListingIds || []);
+        // Which rule classified this event ('price' | 'listingId' | 'none').
+        const resaleRule =
+          validScrapeResult.find((g) => g.inventory?.resaleRule)?.inventory.resaleRule || null;
+        // On listing-ID events the rule is the same one that wrote today's tags (which
+        // had no fans tagged broker on the concerts checked), so existing broker rows
+        // stay broker. On price-rule events old tags are not trusted (known fan errors).
+        if (resaleRule && resaleRule !== "price") {
+          existingGroups.forEach((group) => {
+            if (!isBrokerTag(group.inventory?.tags)) return;
+            const listingId = extractListingId(group.inventory?.offerId || "");
+            if (listingId !== null) knownBrokerIds.add(String(listingId));
+          });
+        }
         const newBrokerIds = new Set();
         validScrapeResult.forEach((group) => {
           const inv = group.inventory;
@@ -906,7 +920,10 @@ async updateEventMetadata(eventId, scrapeResult) {
             inv.resaleType = "3rd_party_resale";
           }
         });
-        const brokerIdsToSave = [...newBrokerIds].filter((id) => !knownBrokerIds.has(id));
+        const storedBrokerIds = new Set(event.brokerListingIds || []);
+        const brokerIdsToSave = [...knownBrokerIds, ...newBrokerIds].filter(
+          (id) => !storedBrokerIds.has(id)
+        );
         if (brokerIdsToSave.length > 0) {
           await Event.updateOne(
             { Event_ID: eventId },
@@ -1030,8 +1047,12 @@ async updateEventMetadata(eventId, scrapeResult) {
               (existingData.splitType || "") !== (newData.splitType || "");
             // One-time re-tag: on the first scrape after the new broker/fan rules,
             // re-send rows whose tag changed. Afterwards tags only change with other edits.
+            // Price-rule events are re-tagged both ways (old tags had fans as broker);
+            // listing-ID events only gain broker tags, never lose them.
             const needsRetag =
-              !event.resaleRetagDone && (existingData.tags || "") !== (newData.tags || "");
+              !event.resaleRetagDone &&
+              (existingData.tags || "") !== (newData.tags || "") &&
+              (resaleRule === "price" || isBrokerTag(newData.tags));
             if (needsRetag) retaggedRows++;
 
             // Always preserve the existing inventory ID for updates

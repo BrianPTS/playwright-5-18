@@ -123,7 +123,8 @@ const MIN_OFFERS_FOR_FORMAT_CHECK = 20;
  * @param {number} options.minClusterSize - Min listings in a cluster to flag as broker (default: 3)
  * @param {{wholeOfferIds: string[], informative: boolean}} [options.priceSignal] - From
  *   extractPriceSignal(); used instead of clustering when informative
- * @returns {Map<string, string>} Map of offerId -> "verified_resale" | "3rd_party_resale"
+ * @returns {Map<string, string>} Map of offerId -> "verified_resale" | "3rd_party_resale",
+ *   with a `rule` property: 'price' | 'listingId' | 'none' (which rule decided this event)
  */
 export function classifyResaleListings(facets, options = {}) {
   const { clusterGap = 100, minClusterSize = 3, priceSignal } = options;
@@ -160,11 +161,13 @@ export function classifyResaleListings(facets, options = {}) {
         `TM price format looks changed, tagging all fan`
       );
       for (const offerId of offerListingMap.keys()) result.set(offerId, 'verified_resale');
+      result.rule = 'none';
       return result;
     }
     for (const offerId of offerListingMap.keys()) {
       result.set(offerId, wholePrice.has(offerId) ? '3rd_party_resale' : 'verified_resale');
     }
+    result.rule = 'price';
     return result;
   }
 
@@ -203,6 +206,7 @@ export function classifyResaleListings(facets, options = {}) {
   for (const [offerId] of offerListingMap) {
     result.set(offerId, brokerOfferIds.has(offerId) ? '3rd_party_resale' : 'verified_resale');
   }
+  result.rule = 'listingId';
 
   return result;
 }

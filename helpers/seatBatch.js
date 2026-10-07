@@ -420,6 +420,7 @@ export function CreateInventoryAndLine(
       offerId: data?.offerId,
       splitType: isResale ? "DEFAULT" : "NEVERLEAVEONE",
       resaleType: resolvedResaleType,
+      resaleRule: isResale ? resaleClassification.rule || null : null,
       publicNotes: "xfer" + allDescriptions,
       listPrice: totalCost,
       originalFaceValue: faceValue,
