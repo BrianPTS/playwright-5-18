@@ -49,6 +49,12 @@ const eventSchema = new mongoose.Schema(
       type: Date,
       default: Date.now,
     },
+    // TM resale listing IDs ever classified as broker. Broker is sticky: once a
+    // listing is tagged broker it stays broker even if its cluster later shrinks.
+    brokerListingIds: {
+      type: [String],
+      default: [],
+    },
     metadata: {
       lastUpdate: String,
       iterationNumber: Number,

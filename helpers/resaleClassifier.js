@@ -54,7 +54,7 @@ function base32Decode(input) {
  * Extract listing ID from a resale offer ID
  * Returns null for primary offers or if decoding fails
  */
-function extractListingId(offerId) {
+export function extractListingId(offerId) {
   try {
     const decoded = base32Decode(offerId).toString('ascii');
     const parts = decoded.split('|');
@@ -157,4 +157,4 @@ export function getClassificationSummary(classificationMap) {
   return { fan, broker, total: fan + broker };
 }
 
-export default { classifyResaleListings, getClassificationSummary };
+export default { classifyResaleListings, getClassificationSummary, extractListingId };

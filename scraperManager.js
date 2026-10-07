@@ -15,6 +15,7 @@ import _ from 'lodash';
 import InventoryApi from './utils/inventoryApi.js';
 import { cleanup as cleanupBrowsers, browserPagePool } from './browser-cookies.js';
 import redisLiveStore from './helpers/RedisLiveStore.js';
+import { extractListingId } from './helpers/resaleClassifier.js';
 // CSV upload functionality removed
 let inventoryIdCounter = 0;
 
@@ -791,7 +792,7 @@ async updateEventMetadata(eventId, scrapeResult) {
       // Get event data upfront - always fresh, no caching
       const event = await Event.findOne({ Event_ID: eventId })
         .select(
-          "Skip_Scraping priceIncreasePercentage inHandDate mapping_id Available_Seats metadata Event_Name Venue Event_DateTime"
+          "Skip_Scraping priceIncreasePercentage inHandDate mapping_id Available_Seats metadata Event_Name Venue Event_DateTime brokerListingIds"
         ) // Added Skip_Scraping for stop-check, Event_Name, Venue, Event_DateTime
         .session(session)
         .read('primary'); // Force read from primary for fresh data
@@ -881,8 +882,45 @@ async updateEventMetadata(eventId, scrapeResult) {
               "inventory.inventoryId": 1,
               "inventory.customSplit": 1,
               "inventory.splitType": 1,
+              "inventory.offerId": 1,
+              "inventory.tags": 1,
             }
           ).session(session).read('primary'); // Force read from primary for fresh data
+
+        // Broker is sticky per TM listing: once a listing is tagged broker it keeps
+        // that tag even if its ID cluster later shrinks (siblings sold or delisted).
+        // Seed from the event's stored IDs plus any rows already tagged broker.
+        const isBrokerTag = (tags) => /broker/i.test(tags || "");
+        const knownBrokerIds = new Set(event.brokerListingIds || []);
+        existingGroups.forEach((group) => {
+          if (!isBrokerTag(group.inventory?.tags)) return;
+          const listingId = extractListingId(group.inventory?.offerId || "");
+          if (listingId !== null) knownBrokerIds.add(String(listingId));
+        });
+        const newBrokerIds = new Set();
+        validScrapeResult.forEach((group) => {
+          const inv = group.inventory;
+          if (!inv?.offerId || inv.resaleType == null) return; // primary inventory
+          const listingId = extractListingId(inv.offerId);
+          if (listingId === null) return;
+          const key = String(listingId);
+          if (isBrokerTag(inv.tags)) {
+            newBrokerIds.add(key);
+          } else if (knownBrokerIds.has(key)) {
+            inv.tags = "resale broker";
+            inv.resaleType = "3rd_party_resale";
+          }
+        });
+        const storedBrokerIds = new Set(event.brokerListingIds || []);
+        const brokerIdsToSave = [...knownBrokerIds, ...newBrokerIds].filter(
+          (id) => !storedBrokerIds.has(id)
+        );
+        if (brokerIdsToSave.length > 0) {
+          await Event.updateOne(
+            { Event_ID: eventId },
+            { $addToSet: { brokerListingIds: { $each: brokerIdsToSave } } }
+          ).session(session);
+        }
 
         // Create maps for efficient lookups
         const existingRowMap = new Map();
