@@ -1079,7 +1079,7 @@ async function browserApiRequest(url, headers = {}, proxy = null, cookies = null
         if (data && text.includes('"listPrice"')) {
           const wholeOfferIds = [];
           let informative = false;
-          const re = /"offerId"\s*:\s*"([A-Z0-9]+)"[^{}]*?"listPrice"\s*:\s*(-?[\d.eE+]+)/g;
+          const re = /"offerId"\s*:\s*"([A-Z0-9]+)"[^{}]*?"inventoryType"\s*:\s*"resale"[^{}]*?"listPrice"\s*:\s*(-?[\d.eE+]+)/g;
           let m;
           while ((m = re.exec(text))) {
             if (!/[.eE]/.test(m[2])) { wholeOfferIds.push(m[1]); informative = true; }
@@ -1262,7 +1262,7 @@ class RequestBatcher {
             if (d && text.includes('"listPrice"')) {
               const wholeOfferIds = [];
               let informative = false;
-              const re = /"offerId"\s*:\s*"([A-Z0-9]+)"[^{}]*?"listPrice"\s*:\s*(-?[\d.eE+]+)/g;
+              const re = /"offerId"\s*:\s*"([A-Z0-9]+)"[^{}]*?"inventoryType"\s*:\s*"resale"[^{}]*?"listPrice"\s*:\s*(-?[\d.eE+]+)/g;
               let m;
               while ((m = re.exec(text))) {
                 if (!/[.eE]/.test(m[2])) { wholeOfferIds.push(m[1]); informative = true; }

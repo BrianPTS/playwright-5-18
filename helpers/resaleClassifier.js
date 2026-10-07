@@ -84,10 +84,10 @@ export function extractListingId(offerId) {
   }
 }
 
-const LIST_PRICE_RE = /"offerId"\s*:\s*"([A-Z0-9]+)"[^{}]*?"listPrice"\s*:\s*(-?[\d.eE+]+)/g;
+const LIST_PRICE_RE = /"offerId"\s*:\s*"([A-Z0-9]+)"[^{}]*?"inventoryType"\s*:\s*"resale"[^{}]*?"listPrice"\s*:\s*(-?[\d.eE+]+)/g;
 
 /**
- * Read the price formatting from a raw facets/offers response.
+ * Read the price formatting of resale offers from a raw facets/offers response.
  * Returns { wholeOfferIds, informative }: offers whose listPrice has no decimal point,
  * and whether this event uses the format that separates brokers (whole number vs one
  * decimal) rather than the uniform two-decimal format.
