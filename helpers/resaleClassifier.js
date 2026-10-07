@@ -24,9 +24,10 @@
  *   fan listings one decimal ("listPrice": 147.0). On others (both Bruno Mars shows
  *   checked) every price has two decimals ("722.00") and carries no seller signal.
  * - Checked against the broker source (CIMS), Oct 2026. Price rule: Steelers vs Colts
- *   336/340 brokers, 0/1462 fans; Jets vs Browns 909/909 brokers, 0/728 fans.
- *   ID clustering gap<=25/size>=3: Steelers 75 brokers, 0 fans; Jets 433, 10 fans;
- *   Bruno Oct 10 231/377, 0 fans; Bruno Oct 11 204/405, 0 fans.
+ *   336/340 brokers, 0/1462 fans; Jets vs Browns 909/909 brokers, 0/728 fans;
+ *   Tennessee vs Alabama 341/344, 0 fans. ID clustering (gap<=100, size>=3) on the
+ *   two-decimal events: Bruno Oct 10 231/377, Bruno Oct 11 209/405, Usher 45/90,
+ *   0 fans each. A tighter gap (25) made no difference there, so it stays at 100.
  * - So: price rule when the event uses the whole/one-decimal format, clustering when
  *   it uses two decimals. JSON.parse erases the formatting, so fetchers pass
  *   extractPriceSignal(rawText) along with the parsed response.
@@ -118,14 +119,14 @@ const MIN_OFFERS_FOR_FORMAT_CHECK = 20;
  *
  * @param {Array} facets - Raw facets array from the ISMDS API response
  * @param {Object} options
- * @param {number} options.clusterGap - Max gap between listing IDs to be considered same cluster (default: 25)
+ * @param {number} options.clusterGap - Max gap between listing IDs to be considered same cluster (default: 100)
  * @param {number} options.minClusterSize - Min listings in a cluster to flag as broker (default: 3)
  * @param {{wholeOfferIds: string[], informative: boolean}} [options.priceSignal] - From
  *   extractPriceSignal(); used instead of clustering when informative
  * @returns {Map<string, string>} Map of offerId -> "verified_resale" | "3rd_party_resale"
  */
 export function classifyResaleListings(facets, options = {}) {
-  const { clusterGap = 25, minClusterSize = 3, priceSignal } = options;
+  const { clusterGap = 100, minClusterSize = 3, priceSignal } = options;
 
   // Step 1: Extract listing IDs from all resale facets
   const offerListingMap = new Map(); // offerId -> listingId
