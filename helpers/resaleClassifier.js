@@ -16,14 +16,7 @@
  * - This is a heuristic, not a guarantee
  * - A fan who lists tickets for multiple events at once could appear clustered
  * - A broker who lists one pair looks isolated
- * - Ticketmaster does not expose seller type in the facets API (re-checked Oct 2026: offers
- *   now carry listingId/listingVersionId, but no seller field)
- *
- * Thresholds are biased toward "fan": a broker tagged as fan is harmless, a fan tagged as
- * broker is not. Unrelated listings land near each other by chance, and that rate grows
- * with the square of listing density, so busy events produce false broker clusters.
- * On a 2,183-listing event, gap<=100/size>=3 tagged ~6 random fans as broker (~117 at 5x
- * density); gap<=50/size>=4 tags ~0 (~5 at 5x) and still keeps ~65% of the broker tags.
+ * - Ticketmaster does not expose seller type in the facets API
  */
 
 // Base32 alphabet (RFC 4648)
@@ -83,12 +76,12 @@ function extractListingId(offerId) {
  *
  * @param {Array} facets - Raw facets array from the ISMDS API response
  * @param {Object} options
- * @param {number} options.clusterGap - Max gap between listing IDs to be considered same cluster (default: 50)
- * @param {number} options.minClusterSize - Min listings in a cluster to flag as broker (default: 4)
+ * @param {number} options.clusterGap - Max gap between listing IDs to be considered same cluster (default: 100)
+ * @param {number} options.minClusterSize - Min listings in a cluster to flag as broker (default: 3)
  * @returns {Map<string, string>} Map of offerId -> "verified_resale" | "3rd_party_resale"
  */
 export function classifyResaleListings(facets, options = {}) {
-  const { clusterGap = 50, minClusterSize = 4 } = options;
+  const { clusterGap = 100, minClusterSize = 3 } = options;
 
   // Step 1: Extract listing IDs from all resale facets
   const offerListingMap = new Map(); // offerId -> listingId
