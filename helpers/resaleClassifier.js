@@ -21,11 +21,13 @@
  * Price-format signal (preferred when available):
  * - In the raw offer JSON, broker listings carry whole-number prices ("listPrice": 147)
  *   while fan listings carry a decimal ("listPrice": 147.0). Checked against the broker
- *   source (CIMS) on Steelers vs Colts, Oct 2026: 336/340 brokers whole-number, 0/1462
- *   fans. JSON.parse erases the difference, so fetchers pass the offer IDs found in
- *   the raw text via findWholePriceOfferIds().
- * - Cluster fallback thresholds are tuned so no fan is tagged broker on that same
- *   check (gap<=25/size>=3: 75 brokers, 0 fans; the old gap<=100: 91 brokers, 9 fans).
+ *   source (CIMS), Oct 2026: Steelers vs Colts 336/340 brokers whole-number, 0/1462
+ *   fans; Jets vs Browns 909/909 brokers, 0/728 fans. JSON.parse erases the
+ *   difference, so fetchers pass the offer IDs found in the raw text via
+ *   findWholePriceOfferIds().
+ * - Without that signal everything is tagged fan: ID clustering still tagged fans as
+ *   broker on both events (gap<=100: 9 and 13; gap<=25: 0 and 10). Clustering stays
+ *   available via options.clusterFallback.
  */
 
 // Base32 alphabet (RFC 4648)
@@ -94,9 +96,10 @@ export function findWholePriceOfferIds(rawText) {
   return ids;
 }
 
-// If more than this share of resale offers look whole-priced, assume TM changed its
-// price formatting and fall back to clustering rather than tagging everything broker.
-const MAX_WHOLE_PRICE_SHARE = 0.5;
+// If every resale offer on a reasonably sized event looks whole-priced, assume TM
+// changed its price formatting rather than tag the whole event broker. Real events
+// can be majority broker (Jets vs Browns was 55%), so a share cap would misfire.
+const MIN_OFFERS_FOR_FORMAT_CHECK = 20;
 
 /**
  * Classify resale listings from facets data.
@@ -105,12 +108,13 @@ const MAX_WHOLE_PRICE_SHARE = 0.5;
  * @param {Object} options
  * @param {number} options.clusterGap - Max gap between listing IDs to be considered same cluster (default: 25)
  * @param {number} options.minClusterSize - Min listings in a cluster to flag as broker (default: 3)
- * @param {string[]} [options.wholePriceOfferIds] - From findWholePriceOfferIds(); when present,
- *   used instead of clustering
+ * @param {string[]} [options.wholePriceOfferIds] - From findWholePriceOfferIds()
+ * @param {boolean} [options.clusterFallback] - Use ID clustering when the price signal is
+ *   missing or unusable (default: tag everything fan)
  * @returns {Map<string, string>} Map of offerId -> "verified_resale" | "3rd_party_resale"
  */
 export function classifyResaleListings(facets, options = {}) {
-  const { clusterGap = 25, minClusterSize = 3, wholePriceOfferIds } = options;
+  const { clusterGap = 25, minClusterSize = 3, wholePriceOfferIds, clusterFallback = false } = options;
 
   // Step 1: Extract listing IDs from all resale facets
   const offerListingMap = new Map(); // offerId -> listingId
@@ -136,7 +140,9 @@ export function classifyResaleListings(facets, options = {}) {
     const wholePrice = new Set(wholePriceOfferIds);
     let wholeCount = 0;
     for (const offerId of offerListingMap.keys()) if (wholePrice.has(offerId)) wholeCount++;
-    if (wholeCount / offerListingMap.size <= MAX_WHOLE_PRICE_SHARE) {
+    const formatLooksBroken =
+      offerListingMap.size >= MIN_OFFERS_FOR_FORMAT_CHECK && wholeCount === offerListingMap.size;
+    if (!formatLooksBroken) {
       const result = new Map();
       for (const offerId of offerListingMap.keys()) {
         result.set(offerId, wholePrice.has(offerId) ? '3rd_party_resale' : 'verified_resale');
@@ -144,9 +150,18 @@ export function classifyResaleListings(facets, options = {}) {
       return result;
     }
     console.warn(
-      `[ResaleClassifier] ${wholeCount}/${offerListingMap.size} resale offers whole-priced; ` +
-      `price format looks changed, falling back to ID clustering`
+      `[ResaleClassifier] all ${wholeCount} resale offers whole-priced; ` +
+      `TM price format looks changed, not trusting the price signal`
     );
+  } else {
+    console.warn('[ResaleClassifier] no raw price data for this response');
+  }
+
+  if (!clusterFallback) {
+    // A broker tagged fan is harmless, a fan tagged broker is not.
+    const result = new Map();
+    for (const offerId of offerListingMap.keys()) result.set(offerId, 'verified_resale');
+    return result;
   }
 
   // Step 2: Sort all listing IDs and find clusters
