@@ -881,6 +881,7 @@ async updateEventMetadata(eventId, scrapeResult) {
               "inventory.inventoryId": 1,
               "inventory.customSplit": 1,
               "inventory.splitType": 1,
+              "inventory.tags": 1,
             }
           ).session(session).read('primary'); // Force read from primary for fresh data
 
@@ -915,6 +916,7 @@ async updateEventMetadata(eventId, scrapeResult) {
             inventoryId: group.inventory?.inventoryId,
             customSplit: group.inventory?.customSplit,
             splitType: group.inventory?.splitType,
+            tags: group.inventory?.tags,
           });
         });
 
@@ -951,6 +953,7 @@ async updateEventMetadata(eventId, scrapeResult) {
             quantity: group.inventory.quantity,
             customSplit: group.inventory.customSplit,
             splitType: group.inventory.splitType,
+            tags: group.inventory.tags,
             groupData: group,
           });
         });
@@ -996,6 +999,10 @@ async updateEventMetadata(eventId, scrapeResult) {
               (existingData.customSplit || "") !== (newData.customSplit || "");
             const splitTypeChanged =
               (existingData.splitType || "") !== (newData.splitType || "");
+            // Resale broker/fan tags can change between scrapes; without this a
+            // stale "resale broker" tag sticks until price/seats/qty change.
+            const tagsChanged =
+              (existingData.tags || "") !== (newData.tags || "");
 
             // Always preserve the existing inventory ID for updates
             // Only generate new inventory IDs for truly new inventory or deleted/re-added rows
@@ -1003,7 +1010,7 @@ async updateEventMetadata(eventId, scrapeResult) {
 
             // Now, decide if the DB record needs an update for any of these fields
              // Force delete-and-insert for all changes to ensure fresh inventory IDs
-             if (seatsChanged || priceChanged || quantityChanged || customSplitChanged || splitTypeChanged) {
+             if (seatsChanged || priceChanged || quantityChanged || customSplitChanged || splitTypeChanged || tagsChanged) {
                rowsToDelete.push(existingData._id);
                rowsToInsert.push({ rowKey, data: newData });
              } else {
