@@ -55,6 +55,12 @@ const eventSchema = new mongoose.Schema(
       type: [String],
       default: [],
     },
+    // One-time re-tag: set once the first scrape after the new broker/fan rules has
+    // re-sent every row whose tag changed. Until then tag changes trigger a re-sync.
+    resaleRetagDone: {
+      type: Boolean,
+      default: false,
+    },
     metadata: {
       lastUpdate: String,
       iterationNumber: Number,

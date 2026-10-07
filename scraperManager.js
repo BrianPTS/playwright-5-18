@@ -792,7 +792,7 @@ async updateEventMetadata(eventId, scrapeResult) {
       // Get event data upfront - always fresh, no caching
       const event = await Event.findOne({ Event_ID: eventId })
         .select(
-          "Skip_Scraping priceIncreasePercentage inHandDate mapping_id Available_Seats metadata Event_Name Venue Event_DateTime brokerListingIds"
+          "Skip_Scraping priceIncreasePercentage inHandDate mapping_id Available_Seats metadata Event_Name Venue Event_DateTime brokerListingIds resaleRetagDone"
         ) // Added Skip_Scraping for stop-check, Event_Name, Venue, Event_DateTime
         .session(session)
         .read('primary'); // Force read from primary for fresh data
@@ -829,6 +829,7 @@ async updateEventMetadata(eventId, scrapeResult) {
       let rowsToInsert = [];
       let rowsToUpdate = [];
       let unchangedRows = 0;
+      let retaggedRows = 0;
 
       // Filter valid groups - only check for basic structure, allow single seats
       const validScrapeResult = scrapeResult.filter(
@@ -882,6 +883,7 @@ async updateEventMetadata(eventId, scrapeResult) {
               "inventory.inventoryId": 1,
               "inventory.customSplit": 1,
               "inventory.splitType": 1,
+              "inventory.tags": 1,
             }
           ).session(session).read('primary'); // Force read from primary for fresh data
 
@@ -943,6 +945,7 @@ async updateEventMetadata(eventId, scrapeResult) {
             inventoryId: group.inventory?.inventoryId,
             customSplit: group.inventory?.customSplit,
             splitType: group.inventory?.splitType,
+            tags: group.inventory?.tags,
           });
         });
 
@@ -979,6 +982,7 @@ async updateEventMetadata(eventId, scrapeResult) {
             quantity: group.inventory.quantity,
             customSplit: group.inventory.customSplit,
             splitType: group.inventory.splitType,
+            tags: group.inventory.tags,
             groupData: group,
           });
         });
@@ -1024,6 +1028,11 @@ async updateEventMetadata(eventId, scrapeResult) {
               (existingData.customSplit || "") !== (newData.customSplit || "");
             const splitTypeChanged =
               (existingData.splitType || "") !== (newData.splitType || "");
+            // One-time re-tag: on the first scrape after the new broker/fan rules,
+            // re-send rows whose tag changed. Afterwards tags only change with other edits.
+            const needsRetag =
+              !event.resaleRetagDone && (existingData.tags || "") !== (newData.tags || "");
+            if (needsRetag) retaggedRows++;
 
             // Always preserve the existing inventory ID for updates
             // Only generate new inventory IDs for truly new inventory or deleted/re-added rows
@@ -1031,7 +1040,7 @@ async updateEventMetadata(eventId, scrapeResult) {
 
             // Now, decide if the DB record needs an update for any of these fields
              // Force delete-and-insert for all changes to ensure fresh inventory IDs
-             if (seatsChanged || priceChanged || quantityChanged || customSplitChanged || splitTypeChanged) {
+             if (seatsChanged || priceChanged || quantityChanged || customSplitChanged || splitTypeChanged || needsRetag) {
                rowsToDelete.push(existingData._id);
                rowsToInsert.push({ rowKey, data: newData });
              } else {
@@ -1042,6 +1051,14 @@ async updateEventMetadata(eventId, scrapeResult) {
               unchangedRows++;
             }
           }
+        }
+
+        if (!event.resaleRetagDone) {
+          await Event.updateOne(
+            { Event_ID: eventId },
+            { $set: { resaleRetagDone: true } }
+          ).session(session);
+          console.log(`[ResaleRetag] Event ${eventId}: ${retaggedRows} rows re-tagged`);
         }
 
         // Identify new rows to insert
