@@ -19,10 +19,12 @@
  * - Ticketmaster does not expose seller type in the facets API
  *
  * Price-format signal (preferred when the event has it):
- * - TM serializes resale prices one of two ways per event. On some events (both NFL
- *   games checked) broker listings carry whole-number prices ("listPrice": 147) and
- *   fan listings one decimal ("listPrice": 147.0). On others (both Bruno Mars shows
- *   checked) every price has two decimals ("722.00") and carries no seller signal.
+ * - TM serializes resale prices one of two ways per event. On some events (all NFL,
+ *   college and NBA games checked) broker listings carry whole-number prices
+ *   ("listPrice": 147) and fan listings a decimal ("147.0", or "147.00" on Spurs and
+ *   Rams). On others (the concerts checked) every price has two decimals ("722.00"),
+ *   brokers included, and carries no seller signal. Any whole-number resale price
+ *   means the event uses the first format.
  * - Checked against the broker source (CIMS), Oct 2026. Price rule: Steelers vs Colts
  *   336/340 brokers, 0/1462 fans; Jets vs Browns 909/909 brokers, 0/728 fans;
  *   Tennessee vs Alabama 341/344, 0 fans. ID clustering (gap<=100, size>=3) on the
